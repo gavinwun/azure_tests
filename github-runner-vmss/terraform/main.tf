@@ -110,7 +110,7 @@ resource "azurerm_private_endpoint" "bootstrap_blob" {
   name                = local.bootstrap_storage_pep_name
   location            = data.azurerm_resource_group.mgmt_devops.location
   resource_group_name = data.azurerm_resource_group.mgmt_devops.name
-  subnet_id           = data.azurerm_subnet.pep[0].id
+  subnet_id           = local.pep_subnet_id
 
   private_service_connection {
     name                           = local.bootstrap_storage_psc_name
@@ -121,7 +121,7 @@ resource "azurerm_private_endpoint" "bootstrap_blob" {
 
   private_dns_zone_group {
     name                 = "blob-zone-group"
-    private_dns_zone_ids = [data.azurerm_private_dns_zone.blob[0].id]
+    private_dns_zone_ids = [local.blob_private_dns_zone_id]
   }
 
   # RBAC propagation can lag a few seconds behind the role assignment
@@ -193,7 +193,7 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
     ip_configuration {
       name      = "ipconfig"
       primary   = true
-      subnet_id = data.azurerm_subnet.devopsagent[0].id
+      subnet_id = local.devopsagent_subnet_id
     }
   }
 

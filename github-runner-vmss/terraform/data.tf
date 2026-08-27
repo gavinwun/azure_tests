@@ -14,9 +14,15 @@ data "azurerm_key_vault" "mgmt_devops" {
 #########################
 # VMSS-only data sources
 #########################
+# Only used when var.manage_network is false (the default) - these
+# look up an existing hub network. When manage_network = true,
+# network.tf creates equivalent resources instead; see the
+# local.devopsagent_subnet_id / local.pep_subnet_id /
+# local.blob_private_dns_zone_id locals in network.tf, which main.tf
+# and network-rbac.tf reference instead of these directly.
 
 data "azurerm_subnet" "devopsagent" {
-  count = var.compute_backend == "vmss" ? 1 : 0
+  count = var.compute_backend == "vmss" && !var.manage_network ? 1 : 0
 
   name                 = var.devopsagent_subnet_name
   virtual_network_name = var.vnet_name
@@ -24,7 +30,7 @@ data "azurerm_subnet" "devopsagent" {
 }
 
 data "azurerm_subnet" "pep" {
-  count = var.compute_backend == "vmss" ? 1 : 0
+  count = var.compute_backend == "vmss" && !var.manage_network ? 1 : 0
 
   name                 = var.pep_subnet_name
   virtual_network_name = var.vnet_name
@@ -32,7 +38,7 @@ data "azurerm_subnet" "pep" {
 }
 
 data "azurerm_private_dns_zone" "blob" {
-  count = var.compute_backend == "vmss" ? 1 : 0
+  count = var.compute_backend == "vmss" && !var.manage_network ? 1 : 0
 
   name                = var.blob_private_dns_zone_name
   resource_group_name = var.blob_private_dns_zone_resource_group_name

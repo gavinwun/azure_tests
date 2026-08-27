@@ -15,8 +15,32 @@ variable "resource_group_name" {
 }
 
 variable "vnet_resource_group_name" {
-  description = "Resource group containing the existing VNet (may be the same as resource_group_name)."
+  description = "Resource group containing the VNet - either an existing one to look up (manage_network = false, the default) or one this module creates (manage_network = true)."
   type        = string
+}
+
+variable "manage_network" {
+  description = "If true, Terraform creates the hub resource group, VNet, subnets, and private DNS zone itself instead of looking up existing ones - see network.tf. Useful for a from-scratch or throwaway environment. Leave false (default) if vnet_resource_group_name/vnet_name/etc. already point at a real landing-zone network - that's the original, still-supported behaviour."
+  type        = bool
+  default     = false
+}
+
+variable "vnet_address_space" {
+  description = "Address space for the VNet Terraform creates. Only used when manage_network = true."
+  type        = list(string)
+  default     = ["10.0.0.0/16"]
+}
+
+variable "devopsagent_subnet_address_prefix" {
+  description = "Address prefix for the devopsagent subnet Terraform creates. Only used when manage_network = true - must fit within vnet_address_space and not overlap pep_subnet_address_prefix or aci_subnet_address_prefix."
+  type        = string
+  default     = "10.0.1.0/24"
+}
+
+variable "pep_subnet_address_prefix" {
+  description = "Address prefix for the private-endpoint subnet Terraform creates. Only used when manage_network = true - must fit within vnet_address_space and not overlap devopsagent_subnet_address_prefix or aci_subnet_address_prefix."
+  type        = string
+  default     = "10.0.2.0/24"
 }
 
 variable "vnet_name" {

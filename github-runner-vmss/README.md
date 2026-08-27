@@ -26,8 +26,10 @@ terraform/
   custom-metric-autoscale.tf   VMSS-only autoscale rule
   variables.tf                 Input variables, including compute_backend
   locals.tf                    Naming
-  data.tf                      References to your existing RG/VNet/subnets/DNS/Key Vault
-  network-rbac.tf              VMSS-only: grants the deploy identity access to the hub-network RG
+  data.tf                      References to your existing RG/VNet/subnets/DNS/Key Vault (manage_network = false)
+  network.tf                   VMSS-only, optional: creates the hub network instead (manage_network = true)
+  network-rbac.tf              VMSS-only: grants the deploy identity access to an existing hub-network RG
+  keyvault-rbac.tf             VMSS-only: grants the deploy identity secret-read access to the Key Vault
   versions.tf                  Provider constraints
   outputs.tf
   terraform.tfvars.example     Copy to terraform.tfvars and fill in
@@ -510,6 +512,33 @@ workflow carrying that blast radius.
    Same minute-or-two propagation delay as other role assignments in this
    README applies here too.
 
+   **Don't have an existing hub network to point at?** Set
+   `manage_network = true` in `terraform.tfvars` and Terraform creates
+   the resource group/VNet/subnets/private DNS zone itself
+   (`network.tf`), instead of assuming they already exist. This skips
+   everything below in this sub-step - none of the Reader/Network
+   Contributor/Private DNS Zone Contributor grants are needed, since
+   creating that resource group already requires Contributor there
+   (a superset of all three). What it doesn't skip: creating a brand
+   new resource group needs the deploy identity to have write access at
+   a scope that doesn't exist yet, so **pre-create the empty resource
+   group and grant Contributor on it**, same shape as the existing
+   `resource_group_name` grant above but targeting
+   `vnet_resource_group_name` instead:
+   ```bash
+   az group create --name <vnet-resource-group-name> --location <location>
+   az role assignment create \
+     --assignee "$appId" \
+     --role "Contributor" \
+     --scope $(az group show --name <vnet-resource-group-name> --query id -o tsv)
+   ```
+   If `vnet_resource_group_name` is the same value as
+   `resource_group_name`, this is already covered by the grant above -
+   skip it. Leave `manage_network` at its default `false` if you're
+   pointing at a real landing-zone network someone else manages; only
+   flip it for a from-scratch environment, a demo, or a throwaway test
+   deployment.
+
    **If your `data.tf` references resources outside the main resource
    group** - e.g. a separate hub/landing-zone resource group holding the
    VNet, subnets, or private DNS zones referenced by `data "azurerm_subnet"`
@@ -541,6 +570,21 @@ workflow carrying that blast radius.
    recreated (not just re-authenticated), in which case this one Reader
    grant needs repeating once for the new identity - same category as
    the tfstate storage account bootstrap in step 7.1.
+
+   **Same issue, separately, for the Key Vault.** `data.tf`'s SSH
+   public-key secret lookup is also read during plan, by the deploy
+   identity - not by the VMSS's own managed identity, which is what
+   `main.tf` actually grants Key Vault access to. Without this, plan
+   fails with a 403 on `getSecret/action` before it ever reaches
+   `main.tf`. One-time manual grant, same reasoning as above:
+   ```bash
+   az role assignment create \
+     --assignee "$appId" \
+     --role "Key Vault Secrets User" \
+     --scope $(az keyvault show --name <key-vault-name> --query id -o tsv)
+   ```
+   `keyvault-rbac.tf` takes over managing this grant going forward, same
+   as `network-rbac.tf` does for the hub network access above.
 
    **Also double-check any resource names hardcoded in `data.tf`** (Key
    Vault name, VNet name, subnet names, DNS zone name) actually match what

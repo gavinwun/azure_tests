@@ -9,6 +9,17 @@ vnet_name                = "vnet-hub"
 devopsagent_subnet_name  = "snet-devopsagent"
 pep_subnet_name          = "snet-pep"
 
+# false (default): the names above point at an existing landing-zone
+# network - see README for the Reader/Network Contributor/Private DNS
+# Zone Contributor role grants the deploy identity needs in that case.
+# true: Terraform creates the resource group/VNet/subnets/DNS zone
+# itself using the names above - see README's manage_network note for
+# the one extra permission that needs granting first.
+manage_network = true
+# vnet_address_space                = ["10.0.0.0/16"]
+# devopsagent_subnet_address_prefix = "10.0.1.0/24"
+# pep_subnet_address_prefix         = "10.0.2.0/24"
+
 blob_private_dns_zone_name                = "privatelink.blob.core.windows.net"
 blob_private_dns_zone_resource_group_name = "rg-network-hub"
 
@@ -19,8 +30,8 @@ vm_size        = "Standard_D4s_v5"
 instance_count = 2
 admin_username = "azureuser"
 
-github_org  = "your-org"
-environment = "dev"
+github_org  = "gavinwun"
+environment = "production"
 
 # "vmss" (default) or "aci" - see README for the full switch-over
 # procedure before changing this on a live deployment.
