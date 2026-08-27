@@ -134,15 +134,45 @@ runner-registration tokens - keep its permissions minimal.
 
 ### 2. Set up Azure OIDC for the refresh workflow
 
-1. Create (or reuse) an Azure AD App registration for this workflow:
+1. Create (or reuse) an Azure AD App registration for this workflow. The
+   commands below capture the `appId` automatically with `--query`
+   instead of you having to copy it out of the JSON output by hand, and
+   fail fast (`set -euo pipefail` plus an explicit empty-value check) if
+   the create step doesn't actually return one - e.g. an expired login or
+   a permissions error that still exits 0:
    ```bash
-   az ad app create --display-name "gh-runner-token-refresh"
-   az ad sp create --id <appId-from-above>
+   set -euo pipefail
+
+   appId=$(az ad app create --display-name "gh-runner-token-refresh" --query appId -o tsv)
+   if [[ -z "$appId" || "$appId" == "null" ]]; then
+     echo "ERROR: Failed to create app registration or retrieve appId" >&2
+     exit 1
+   fi
+   echo "App ID: $appId"
+
+   if ! az ad sp create --id "$appId"; then
+     echo "ERROR: Failed to create service principal for appId $appId" >&2
+     exit 1
+   fi
+   echo "Service principal created successfully"
+   ```
+   Note this isn't idempotent - re-running it creates a duplicate app
+   each time. If you need to re-run this block safely (e.g. in CI), look
+   up the existing app by display name first:
+   ```bash
+   existing=$(az ad app list --display-name "gh-runner-token-refresh" --query "[0].appId" -o tsv)
+   if [[ -n "$existing" && "$existing" != "null" ]]; then
+     echo "App already exists with appId: $existing"
+     appId="$existing"
+   else
+     appId=$(az ad app create --display-name "gh-runner-token-refresh" --query appId -o tsv)
+     # ...same empty-value check as above
+   fi
    ```
 2. Add a federated credential scoped to this exact repo + workflow:
    ```bash
    az ad app federated-credential create \
-     --id <appId> \
+     --id "$appId" \
      --parameters '{
        "name": "gh-runner-token-refresh",
        "issuer": "https://token.actions.githubusercontent.com",
@@ -154,7 +184,7 @@ runner-registration tokens - keep its permissions minimal.
    limited to `set`) scoped to just the Key Vault:
    ```bash
    az role assignment create \
-     --assignee <appId> \
+     --assignee "$appId" \
      --role "Key Vault Secrets Officer" \
      --scope $(az keyvault show --name <key-vault-name> --query id -o tsv)
    ```
@@ -225,13 +255,25 @@ workflow carrying that blast radius.
    your subscription works fine.
 2. **A second App registration + federated credential**, this time with
    two subjects - one for pull requests (plan) and one for the main branch
-   (apply):
+   (apply). Same auto-capture + error-check pattern as step 2 above:
    ```bash
-   az ad app create --display-name "gh-runner-vmss-terraform-deploy"
-   az ad sp create --id <appId>
+   set -euo pipefail
+
+   appId=$(az ad app create --display-name "gh-runner-vmss-terraform-deploy" --query appId -o tsv)
+   if [[ -z "$appId" || "$appId" == "null" ]]; then
+     echo "ERROR: Failed to create app registration or retrieve appId" >&2
+     exit 1
+   fi
+   echo "App ID: $appId"
+
+   if ! az ad sp create --id "$appId"; then
+     echo "ERROR: Failed to create service principal for appId $appId" >&2
+     exit 1
+   fi
+   echo "Service principal created successfully"
 
    # Federated credential for PR-triggered plans
-   az ad app federated-credential create --id <appId> --parameters '{
+   az ad app federated-credential create --id "$appId" --parameters '{
      "name": "tf-deploy-pr",
      "issuer": "https://token.actions.githubusercontent.com",
      "subject": "repo:<your-org>/<this-repo>:pull_request",
@@ -239,7 +281,7 @@ workflow carrying that blast radius.
    }'
 
    # Federated credential for main-branch applies
-   az ad app federated-credential create --id <appId> --parameters '{
+   az ad app federated-credential create --id "$appId" --parameters '{
      "name": "tf-deploy-main",
      "issuer": "https://token.actions.githubusercontent.com",
      "subject": "repo:<your-org>/<this-repo>:ref:refs/heads/main",
@@ -255,7 +297,7 @@ workflow carrying that blast radius.
    ```bash
    for role in Contributor "Role Based Access Control Administrator"; do
      az role assignment create \
-       --assignee <appId> \
+       --assignee "$appId" \
        --role "$role" \
        --scope $(az group show --name <resource-group-name> --query id -o tsv)
    done
@@ -343,13 +385,26 @@ the updated permissions on the org installation.
 
 Same reasoning as the deploy pipeline's separate identity - narrowest
 possible permissions for what this workflow actually does (publish one
-metric against one resource, nothing else):
+metric against one resource, nothing else). Same auto-capture +
+error-check pattern as steps 2 and 7:
 
 ```bash
-az ad app create --display-name "gh-runner-queue-poller"
-az ad sp create --id <appId>
+set -euo pipefail
 
-az ad app federated-credential create --id <appId> --parameters '{
+appId=$(az ad app create --display-name "gh-runner-queue-poller" --query appId -o tsv)
+if [[ -z "$appId" || "$appId" == "null" ]]; then
+  echo "ERROR: Failed to create app registration or retrieve appId" >&2
+  exit 1
+fi
+echo "App ID: $appId"
+
+if ! az ad sp create --id "$appId"; then
+  echo "ERROR: Failed to create service principal for appId $appId" >&2
+  exit 1
+fi
+echo "Service principal created successfully"
+
+az ad app federated-credential create --id "$appId" --parameters '{
   "name": "queue-poller",
   "issuer": "https://token.actions.githubusercontent.com",
   "subject": "repo:<your-org>/<this-repo>:ref:refs/heads/main",
@@ -357,7 +412,7 @@ az ad app federated-credential create --id <appId> --parameters '{
 }'
 
 az role assignment create \
-  --assignee <appId> \
+  --assignee "$appId" \
   --role "Monitoring Metrics Publisher" \
   --scope $(terraform -chdir=terraform output -raw vmss_id)
 ```
@@ -471,13 +526,26 @@ az role assignment create \
 
 Used by both `build-and-push-runner-image.yml` and
 `reconcile-aci-runners.yml`. Grouped together deliberately since both are
-"manage the runner compute" concerns:
+"manage the runner compute" concerns. Same auto-capture + error-check
+pattern as the other identities above:
 
 ```bash
-az ad app create --display-name "gh-runner-aci-orchestrator"
-az ad sp create --id <appId>
+set -euo pipefail
 
-az ad app federated-credential create --id <appId> --parameters '{
+appId=$(az ad app create --display-name "gh-runner-aci-orchestrator" --query appId -o tsv)
+if [[ -z "$appId" || "$appId" == "null" ]]; then
+  echo "ERROR: Failed to create app registration or retrieve appId" >&2
+  exit 1
+fi
+echo "App ID: $appId"
+
+if ! az ad sp create --id "$appId"; then
+  echo "ERROR: Failed to create service principal for appId $appId" >&2
+  exit 1
+fi
+echo "Service principal created successfully"
+
+az ad app federated-credential create --id "$appId" --parameters '{
   "name": "aci-orchestrator",
   "issuer": "https://token.actions.githubusercontent.com",
   "subject": "repo:<your-org>/<this-repo>:ref:refs/heads/main",
@@ -489,14 +557,14 @@ Grant it, after `terraform apply` has created the ACR:
 ```bash
 # Push images (build-and-push-runner-image.yml)
 az role assignment create \
-  --assignee <appId> \
+  --assignee "$appId" \
   --role "AcrPush" \
   --scope $(terraform -chdir=terraform output -raw acr_login_server | \
              xargs -I{} az acr show --name $(terraform -chdir=terraform output -raw acr_name) --query id -o tsv)
 
 # Create/delete/list container groups (reconcile-aci-runners.yml)
 az role assignment create \
-  --assignee <appId> \
+  --assignee "$appId" \
   --role "Azure Container Instances Contributor Role" \
   --scope $(az group show --name <resource-group-name> --query id -o tsv)
 ```
