@@ -403,7 +403,23 @@ workflow carrying that blast radius.
 2. **A second App registration + federated credential**, this time with
    two subjects - one for pull requests (plan) and one for the main branch
    (apply). Same auto-capture + error-check pattern as step 2 above, and
-   same note as step 2 on the plain-vs-immutable subject format (see step 1a):
+   same note as step 2 on the plain-vs-immutable subject format (see step 1a).
+
+   **Important:** this reuses the `$appId` variable name from step 2 above -
+   if you're pasting commands into the same terminal session, this
+   overwrites that earlier value. Before running anything below, confirm
+   you don't still need the old `$appId` for anything, and after this
+   block completes, confirm it actually points at the new app before
+   adding federated credentials to it:
+   ```bash
+   az ad app show --id "$appId" --query displayName -o tsv   # should print gh-runner-vmss-terraform-deploy
+   ```
+   If it prints `gh-runner-token-refresh` (or anything else) instead, the
+   `az ad app create` below didn't run or its output wasn't captured -
+   re-run the block rather than proceeding, since creating a federated
+   credential against the wrong app's `$appId` will either land it on the
+   wrong identity or fail with an "issuer and subject must be unique"
+   error if that exact subject already exists there.
    ```bash
    set -euo pipefail
 
@@ -436,6 +452,28 @@ workflow carrying that blast radius.
      "audiences": ["api://AzureADTokenExchange"]
    }'
    ```
+   **If you also set up the environment protection rule in step 5 below,**
+   add a *third* federated credential now, or the `apply` job will fail at
+   login with `AADSTS700213: No matching federated identity record found`
+   even though `tf-deploy-main` above looks like it should match. Reason:
+   a job that declares `environment: production` gets an OIDC subject in
+   the form `repo:<org>/<repo>:environment:production` - not
+   `ref:refs/heads/main` - regardless of which branch triggered it. This
+   is easy to miss because it only surfaces once you actually reach an
+   `apply` run with the environment gate active, not at credential-creation
+   time:
+   ```bash
+   az ad app federated-credential create --id "$appId" --parameters '{
+     "name": "tf-deploy-production-env",
+     "issuer": "https://token.actions.githubusercontent.com",
+     "subject": "repo:<your-org>/<this-repo>:environment:production",
+     "audiences": ["api://AzureADTokenExchange"]
+   }'
+   ```
+   Substitute the immutable `<org>@$ownerId/<repo>@$repoId` form here too
+   if that's what your repo issues (see step 1a) - and if you rename the
+   environment from `production` to something else in step 5, this
+   subject's `environment:` suffix must match it exactly.
 3. **Grant it the roles `main.tf` needs to actually create things** -
    scope these to the target resource group, not the whole subscription:
    - `Contributor` (VMSS, NIC, storage account, private endpoint)
@@ -464,7 +502,10 @@ workflow carrying that blast radius.
 5. **Set up an environment protection rule**: repo Settings → Environments
    → New environment → `production` → require reviewers. This gates the
    `apply` job behind manual approval even after a PR merges - remove it
-   later if you want fully automatic applies.
+   later if you want fully automatic applies. **If you're adding this,**
+   make sure you've also added the `tf-deploy-production-env` federated
+   credential back in step 2 above, or the gated `apply` job will fail
+   OIDC login once it actually runs.
 
 6. `terraform.tfvars` is already committed in this bundle with placeholder
    values (nothing in it is sensitive - just resource/subnet/VNet names).
@@ -535,7 +576,13 @@ Same reasoning as the deploy pipeline's separate identity - narrowest
 possible permissions for what this workflow actually does (publish one
 metric against one resource, nothing else). Same auto-capture +
 error-check pattern as steps 2 and 7, and same plain-vs-immutable subject
-note as step 1a:
+note as step 1a.
+
+**Same `$appId` reuse caveat as step 7** - this overwrites `$appId` from
+whichever identity you created last. Verify after creation:
+```bash
+az ad app show --id "$appId" --query displayName -o tsv   # should print gh-runner-queue-poller
+```
 
 ```bash
 set -euo pipefail
@@ -677,7 +724,12 @@ Used by both `build-and-push-runner-image.yml` and
 `reconcile-aci-runners.yml`. Grouped together deliberately since both are
 "manage the runner compute" concerns. Same auto-capture + error-check
 pattern as the other identities above, and same plain-vs-immutable subject
-note as step 1a:
+note as step 1a.
+
+**Same `$appId` reuse caveat as step 7** - verify after creation:
+```bash
+az ad app show --id "$appId" --query displayName -o tsv   # should print gh-runner-aci-orchestrator
+```
 
 ```bash
 set -euo pipefail

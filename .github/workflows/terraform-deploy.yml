@@ -9,7 +9,7 @@ on:
   push:
     branches: [main]
     paths:
-      - 'terraform/**'
+      - 'github-runner-vmss/terraform/**'
       - '.github/workflows/terraform-deploy.yml'
   workflow_dispatch: {}   # manual re-apply without a code change
 
@@ -20,7 +20,7 @@ permissions:
 
 env:
   TF_VERSION: "1.9.8"
-  TF_WORKING_DIR: "terraform"
+  TF_WORKING_DIR: "github-runner-vmss/terraform"
 
 concurrency:
   group: terraform-vmss-${{ github.ref }}
