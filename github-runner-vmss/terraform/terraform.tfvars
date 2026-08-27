@@ -24,7 +24,7 @@ environment = "dev"
 
 # "vmss" (default) or "aci" - see README for the full switch-over
 # procedure before changing this on a live deployment.
-compute_backend = "aci"
+compute_backend = "vmss"
 
 tags = {
   costCentre = "platform-engineering"
