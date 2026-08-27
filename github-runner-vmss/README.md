@@ -57,6 +57,63 @@ Do these in order. Specifically: **the Key Vault secret must exist before
 any VMSS instance boots**, or the bootstrap script has nothing to
 authenticate with on first boot.
 
+### 0. Create the Key Vault (skip if you already have one)
+
+Everything else in this README - the GitHub App token, the VMSS SSH
+public key, all the OIDC role assignments - references an existing Key
+Vault by name. If you don't already have one to point this at, create it
+first. Paste this whole block into **Azure Portal → Cloud Shell** (Bash):
+
+```bash
+# --- Adjust these three to your environment ---
+RESOURCE_GROUP_NAME="rg-mgmt-devops"
+LOCATION="australiaeast"
+KEY_VAULT_NAME="kv-ghrunner-$RANDOM"   # must be globally unique, 3-24 chars, letters/numbers/hyphens only
+
+# Create the resource group if it doesn't already exist (no-ops safely if it does)
+az group create --name "$RESOURCE_GROUP_NAME" --location "$LOCATION"
+
+# Create the vault with RBAC authorization enabled - required, since every
+# role assignment in this README (Key Vault Secrets User / Secrets
+# Officer) is an Azure RBAC role. The older access-policy model doesn't
+# recognise those and everything downstream would silently fail on
+# permission errors.
+az keyvault create \
+  --name "$KEY_VAULT_NAME" \
+  --resource-group "$RESOURCE_GROUP_NAME" \
+  --location "$LOCATION" \
+  --enable-rbac-authorization true
+
+# RBAC vaults grant no data-plane access by default - not even to the
+# account that just created it. Grant yourself rights to manage secrets
+# so steps 4/5 below (seeding the GitHub token, storing the SSH key) work.
+CURRENT_USER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv)
+az role assignment create \
+  --assignee "$CURRENT_USER_OBJECT_ID" \
+  --role "Key Vault Secrets Officer" \
+  --scope $(az keyvault show --name "$KEY_VAULT_NAME" --query id -o tsv)
+
+echo ""
+echo "Key Vault created: $KEY_VAULT_NAME"
+echo "Resource group:    $RESOURCE_GROUP_NAME"
+echo ""
+echo "Use these as key_vault_name / key_vault_resource_group_name in"
+echo "terraform.tfvars, and in every az command in the rest of this README"
+echo "that references a Key Vault."
+```
+
+Role assignment propagation can take a minute or two - if the very next
+command (e.g. `az keyvault secret set`) fails with a permissions error
+immediately after this runs, wait briefly and retry before assuming
+something's wrong.
+
+**Already have a vault that uses the older access-policy model instead of
+RBAC?** Either migrate it (`az keyvault update --name <vault> --enable-rbac-authorization true`
+- confirm this doesn't break anything else already relying on that vault's
+access policies first) or create a fresh, dedicated vault via the block
+above rather than fighting the two authorization models against each
+other.
+
 ### 1. Create the GitHub App
 
 This App's installation token is what lets the refresh workflow mint
