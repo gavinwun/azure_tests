@@ -132,6 +132,48 @@ runner-registration tokens - keep its permissions minimal.
    All repositories, or none, since it only needs org-level runner
    permissions, not repo access)
 
+### 1a. Get your GitHub owner ID and repository ID
+
+Every federated credential subject below needs your org/user name and repo
+name. **If your repo uses GitHub's immutable OIDC subject format** (default
+for all repos created after July 15, 2026, and any repo that's opted in),
+the subject GitHub actually issues also embeds two numeric IDs -
+`repo:<owner>@<ownerId>/<repo>@<repoId>:ref:...` - and the federated
+credential's `subject` must match that exact string, numeric IDs included,
+or login fails with `AADSTS700213: No matching federated identity record
+found`.
+
+Grab both IDs once, up front, so every step below can reuse them:
+
+```bash
+# Requires the GitHub CLI (gh) - or use the curl fallback below if you don't have it
+ownerId=$(gh api users/<your-org-or-username> --jq .id)
+repoId=$(gh api repos/<your-org>/<this-repo> --jq .id)
+echo "Owner ID: $ownerId"
+echo "Repo ID:  $repoId"
+```
+
+Without `gh`, plain REST works too (no auth needed for public repos):
+```bash
+ownerId=$(curl -s https://api.github.com/repos/<your-org>/<this-repo> | jq '.owner.id')
+repoId=$(curl -s https://api.github.com/repos/<your-org>/<this-repo> | jq '.id')
+```
+
+To check whether immutable subjects are actually active for this repo (and
+see the exact subject prefix GitHub will issue) rather than guessing:
+```bash
+gh api repos/<your-org>/<this-repo>/actions/oidc/customization/sub
+```
+or check repo Settings → Actions → General → OIDC section in the browser.
+
+**Every federated credential `subject` in the steps below is shown in the
+plain `<your-org>/<this-repo>` form.** If immutable subjects are active for
+your repo, substitute `<your-org>@$ownerId/<this-repo>@$repoId` instead -
+e.g. `"subject": "repo:gavinwun@$ownerId/azure_tests@$repoId:ref:refs/heads/main"`.
+If you're not sure which format applies, the `oidc/customization/sub` call
+above tells you definitively - don't assume based on when the repo was
+created, since org-level opt-in can also enable it early.
+
 ### 2. Set up Azure OIDC for the refresh workflow
 
 1. Create (or reuse) an Azure AD App registration for this workflow. The
@@ -169,7 +211,11 @@ runner-registration tokens - keep its permissions minimal.
      # ...same empty-value check as above
    fi
    ```
-2. Add a federated credential scoped to this exact repo + workflow:
+2. Add a federated credential scoped to this exact repo + workflow. Use the
+   plain name-based subject shown here, **or** the immutable
+   `<org>@$ownerId/<repo>@$repoId` form from step 1a if that's what your
+   repo actually issues - check with `gh api repos/<org>/<repo>/actions/oidc/customization/sub`
+   if unsure:
    ```bash
    az ad app federated-credential create \
      --id "$appId" \
@@ -255,7 +301,8 @@ workflow carrying that blast radius.
    your subscription works fine.
 2. **A second App registration + federated credential**, this time with
    two subjects - one for pull requests (plan) and one for the main branch
-   (apply). Same auto-capture + error-check pattern as step 2 above:
+   (apply). Same auto-capture + error-check pattern as step 2 above, and
+   same note as step 2 on the plain-vs-immutable subject format (see step 1a):
    ```bash
    set -euo pipefail
 
@@ -386,7 +433,8 @@ the updated permissions on the org installation.
 Same reasoning as the deploy pipeline's separate identity - narrowest
 possible permissions for what this workflow actually does (publish one
 metric against one resource, nothing else). Same auto-capture +
-error-check pattern as steps 2 and 7:
+error-check pattern as steps 2 and 7, and same plain-vs-immutable subject
+note as step 1a:
 
 ```bash
 set -euo pipefail
@@ -527,7 +575,8 @@ az role assignment create \
 Used by both `build-and-push-runner-image.yml` and
 `reconcile-aci-runners.yml`. Grouped together deliberately since both are
 "manage the runner compute" concerns. Same auto-capture + error-check
-pattern as the other identities above:
+pattern as the other identities above, and same plain-vs-immutable subject
+note as step 1a:
 
 ```bash
 set -euo pipefail
