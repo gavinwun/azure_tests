@@ -123,6 +123,15 @@ resource "azurerm_private_endpoint" "bootstrap_blob" {
     name                 = "blob-zone-group"
     private_dns_zone_ids = [data.azurerm_private_dns_zone.blob[0].id]
   }
+
+  # RBAC propagation can lag a few seconds behind the role assignment
+  # existing in state - wait on these explicitly rather than relying on
+  # Terraform's implicit ordering, since the pep subnet attach and DNS
+  # zone group write both depend on grants from network-rbac.tf.
+  depends_on = [
+    azurerm_role_assignment.pipeline_network_hub_contributor,
+    azurerm_role_assignment.pipeline_private_dns_zone_contributor
+  ]
 }
 
 #########################
@@ -229,6 +238,13 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
   lifecycle {
     ignore_changes = [instances]
   }
+
+  # Same RBAC-propagation reasoning as the private endpoint above - the
+  # devopsagent subnet attach needs pipeline_network_hub_contributor to
+  # have actually taken effect first.
+  depends_on = [
+    azurerm_role_assignment.pipeline_network_hub_contributor
+  ]
 }
 
 # CHANGED: Windows CustomScriptExtension -> Linux CustomScript (v2)

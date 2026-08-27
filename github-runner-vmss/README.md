@@ -27,6 +27,7 @@ terraform/
   variables.tf                 Input variables, including compute_backend
   locals.tf                    Naming
   data.tf                      References to your existing RG/VNet/subnets/DNS/Key Vault
+  network-rbac.tf              VMSS-only: grants the deploy identity access to the hub-network RG
   versions.tf                  Provider constraints
   outputs.tf
   terraform.tfvars.example     Copy to terraform.tfvars and fill in
@@ -47,7 +48,11 @@ docker/
 the VMSS backend) two subnets and a blob private DNS zone **already
 exist** in your environment. Adjust `data.tf` if your existing module
 already has these as outputs/locals elsewhere rather than fresh data
-lookups.
+lookups. If any of these live in a **different resource group** than the
+one you're deploying into (e.g. a separate hub/landing-zone RG for
+networking), see the role-assignment note in step 7.3 - the deploy
+identity needs `Reader` (at minimum) on that resource group too, or every
+plan/apply fails at the data-source lookup stage.
 
 ---
 
@@ -488,6 +493,63 @@ workflow carrying that blast radius.
        --scope $(az group show --name <resource-group-name> --query id -o tsv)
    done
    ```
+   **Also grant data-plane access to the tfstate storage account specifically**
+   - `Contributor` above only covers the storage account's management
+   plane (create/configure/delete the account); it does **not** include
+   blob data operations. Since the backend authenticates via Azure AD
+   (`use_azuread_auth = true`, matching step 7.1's storage account setup)
+   rather than a storage account key, `terraform init` needs an explicit
+   data-plane role or it fails with `AuthorizationPermissionMismatch` on
+   `ListBlobs` the moment it tries to read/lock state:
+   ```bash
+   az role assignment create \
+     --assignee "$appId" \
+     --role "Storage Blob Data Contributor" \
+     --scope $(az storage account show --name <tfstate-storage-account> --resource-group <tfstate-resource-group> --query id -o tsv)
+   ```
+   Same minute-or-two propagation delay as other role assignments in this
+   README applies here too.
+
+   **If your `data.tf` references resources outside the main resource
+   group** - e.g. a separate hub/landing-zone resource group holding the
+   VNet, subnets, or private DNS zones referenced by `data "azurerm_subnet"`
+   / `data "azurerm_private_dns_zone"` blocks - the `Contributor` grant
+   above doesn't cover it, since it's scoped only to `<resource-group-name>`.
+   `network-rbac.tf` codifies the ongoing grants Terraform needs there
+   (`Reader` for the data-source lookups, `Network Contributor` for the
+   subnet attaches, `Private DNS Zone Contributor` for the private
+   endpoint's DNS zone group - three distinct built-in roles, since
+   `Network Contributor` does **not** cover private DNS zone actions).
+
+   **But `network-rbac.tf`'s own role assignments can't bootstrap
+   themselves** - Terraform evaluates `data.tf`'s data sources before
+   any resource in the same run exists, including the role assignments
+   that would grant access to read them. So on a fresh deploy identity,
+   do this **one-time manual grant** first, or the very first
+   `terraform plan` fails at the data-source stage with
+   `AuthorizationFailed` before it ever reaches `network-rbac.tf`:
+   ```bash
+   az role assignment create \
+     --assignee "$appId" \
+     --role "Reader" \
+     --scope $(az group show --name <hub-network-resource-group-name> --query id -o tsv)
+   ```
+   Once that's in place, `terraform apply` creates the `Network
+   Contributor` and `Private DNS Zone Contributor` grants itself via
+   `network-rbac.tf`, and keeps managing all three going forward -
+   nothing further to do manually unless the deploy identity is ever
+   recreated (not just re-authenticated), in which case this one Reader
+   grant needs repeating once for the new identity - same category as
+   the tfstate storage account bootstrap in step 7.1.
+
+   **Also double-check any resource names hardcoded in `data.tf`** (Key
+   Vault name, VNet name, subnet names, DNS zone name) actually match what
+   you created in step 0 and elsewhere - a name mismatch surfaces as
+   `<resource> was not found` rather than a permissions error, and is easy
+   to miss since it looks similar to the 403s above at a glance. In
+   particular, the Key Vault name in `data.tf` must match the
+   `KEYVAULT_NAME` you actually created (see step 0) - not a placeholder
+   or example name left over from copying the template.
 4. **Repo variables** (Settings → Secrets and variables → Actions → Variables):
 
    | Name | Value |
