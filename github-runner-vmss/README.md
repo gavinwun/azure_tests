@@ -310,6 +310,16 @@ script's managed identity), so it doesn't introduce a new trust boundary,
 but don't grant `Secrets User` more broadly than you already do for the
 GitHub App token.
 
+**If `./ghrunner-vmss-key` (no `.pub` extension) is missing** when you get
+to the `az keyvault secret set` command for the private key - e.g. you're
+resuming this step in a new terminal session, or an earlier run already
+`shred`-ed it - the public and private halves are always generated
+together by `ssh-keygen`, so there's no way to recover just the private
+key from the `.pub` file. Simply re-run the `ssh-keygen` command from the
+top of this step to generate a fresh pair, then continue - just make sure
+you re-run **both** `az keyvault secret set` commands afterward so the
+public and private secrets in Key Vault stay matched to the same pair.
+
 ### 6. Configure and edit `bootstrap_agent.sh`
 
 Open `terraform/scripts/bootstrap_agent.sh` and set:
@@ -329,7 +339,67 @@ workflow carrying that blast radius.
 
 1. **Remote state storage** (if you don't already have one): a storage
    account + container to hold the `.tfstate` file. Any existing one in
-   your subscription works fine.
+   your subscription works fine - skip to step 2 if so. Otherwise, paste
+   this into Cloud Shell (Bash):
+   ```bash
+   set -euo pipefail
+
+   # --- Adjust these to your environment ---
+   TFSTATE_RESOURCE_GROUP="rg-mgmt-devops"
+   LOCATION="australiaeast"
+   TFSTATE_STORAGE_ACCOUNT="sttfstate$RANDOM"   # must be globally unique, 3-24 chars, lowercase letters/numbers only
+   TFSTATE_CONTAINER="tfstate"
+
+   # Create the resource group if it doesn't already exist (no-ops safely if it does)
+   az group create --name "$TFSTATE_RESOURCE_GROUP" --location "$LOCATION"
+
+   # Standard_LRS is fine for state - it's small and this isn't the kind of
+   # data that needs geo-redundancy. Enable versioning so a bad `apply`
+   # or corrupted state file can be rolled back instead of being a P1.
+   az storage account create \
+     --name "$TFSTATE_STORAGE_ACCOUNT" \
+     --resource-group "$TFSTATE_RESOURCE_GROUP" \
+     --location "$LOCATION" \
+     --sku Standard_LRS \
+     --kind StorageV2 \
+     --min-tls-version TLS1_2 \
+     --allow-blob-public-access false
+
+   az storage account blob-service-properties update \
+     --account-name "$TFSTATE_STORAGE_ACCOUNT" \
+     --enable-versioning true
+
+   # RBAC vaults grant no data-plane access by default; storage accounts
+   # are the same - grant yourself Storage Blob Data Contributor so the
+   # container-create command below (and any local `terraform init` you
+   # run later) actually works.
+   CURRENT_USER_OBJECT_ID=$(az ad signed-in-user show --query id -o tsv)
+   az role assignment create \
+     --assignee "$CURRENT_USER_OBJECT_ID" \
+     --role "Storage Blob Data Contributor" \
+     --scope $(az storage account show --name "$TFSTATE_STORAGE_ACCOUNT" --resource-group "$TFSTATE_RESOURCE_GROUP" --query id -o tsv)
+
+   # Role assignment propagation can take a minute or two - if the next
+   # command fails with an auth error, wait briefly and retry.
+   az storage container create \
+     --name "$TFSTATE_CONTAINER" \
+     --account-name "$TFSTATE_STORAGE_ACCOUNT" \
+     --auth-mode login
+
+   echo ""
+   echo "TFSTATE_RESOURCE_GROUP:   $TFSTATE_RESOURCE_GROUP"
+   echo "TFSTATE_STORAGE_ACCOUNT:  $TFSTATE_STORAGE_ACCOUNT"
+   echo "TFSTATE_CONTAINER:        $TFSTATE_CONTAINER"
+   echo ""
+   echo "Use these as the repo variables in step 4 below, and as the"
+   echo "-backend-config values in step 8 if you run Terraform locally."
+   ```
+   The identity that runs `terraform init`/`apply` (the App registration
+   created in step 2 below) also needs data-plane access to this
+   container - that's covered by the `Contributor` role granted to it in
+   step 3, since `Contributor` includes storage data actions. If you
+   later narrow that role down, make sure `Storage Blob Data Contributor`
+   (or `Owner`) on this storage account specifically is kept.
 2. **A second App registration + federated credential**, this time with
    two subjects - one for pull requests (plan) and one for the main branch
    (apply). Same auto-capture + error-check pattern as step 2 above, and
