@@ -264,20 +264,51 @@ az keyvault secret show --vault-name <key-vault-name> --name github-app-token \
 The workflow re-runs itself every 30 minutes after this (`on: schedule`),
 so it now stays fresh without further action.
 
-### 5. Store the VMSS SSH public key in Key Vault
+### 5. Store the VMSS SSH key pair in Key Vault
 
-Terraform reads this via `data.azurerm_key_vault_secret.vmss_ssh_public_key`
-(see `data.tf`) rather than generating a key itself:
+Terraform reads the public key via
+`data.azurerm_key_vault_secret.vmss_ssh_public_key` (see `data.tf`) rather
+than generating a key itself. Store the private key alongside it too, so
+you (or `az vmss run-command`) can always retrieve it for debugging
+without depending on whoever generated it still having the local file:
 
 ```bash
 ssh-keygen -t ed25519 -f ./ghrunner-vmss-key -N ""
+
 az keyvault secret set \
   --vault-name <key-vault-name> \
   --name vmss-ssh-public-key \
   --value "$(cat ./ghrunner-vmss-key.pub)"
-# keep ./ghrunner-vmss-key (the private half) somewhere safe if you need
-# to SSH into an instance for debugging
+
+az keyvault secret set \
+  --vault-name <key-vault-name> \
+  --name vmss-ssh-private-key \
+  --value "$(cat ./ghrunner-vmss-key)"
+
+# Once both secrets are confirmed in Key Vault, remove the local private
+# key file rather than leaving a second copy sitting on disk:
+shred -u ./ghrunner-vmss-key   # or `rm -P` / `rm` if shred isn't available
 ```
+
+Confirm both secrets landed:
+```bash
+az keyvault secret list --vault-name <key-vault-name> --query "[?contains(name, 'vmss-ssh')].name" -o tsv
+```
+
+To retrieve the private key later (e.g. to SSH into an instance for
+debugging):
+```bash
+az keyvault secret show --vault-name <key-vault-name> --name vmss-ssh-private-key --query value -o tsv > ./ghrunner-vmss-key
+chmod 600 ./ghrunner-vmss-key
+```
+
+**Note:** the private key is stored as a Key Vault *secret*, not backed by
+an HSM-protected *key* object - anyone with `Key Vault Secrets User` (or
+broader) on this vault can read it in plaintext. That's the same access
+level already required elsewhere in this README (e.g. the bootstrap
+script's managed identity), so it doesn't introduce a new trust boundary,
+but don't grant `Secrets User` more broadly than you already do for the
+GitHub App token.
 
 ### 6. Configure and edit `bootstrap_agent.sh`
 

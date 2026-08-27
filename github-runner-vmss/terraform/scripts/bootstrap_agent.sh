@@ -15,11 +15,11 @@ echo "Starting bootstrap at $(date -u)"
 # ---------------------------------------------------------------------
 # Config - adjust for your org/repo and Key Vault
 # ---------------------------------------------------------------------
-GITHUB_ORG="your-org"
-KEYVAULT_NAME="your-keyvault"
+GITHUB_ORG="gavinwun"
+KEYVAULT_NAME="kv-ghrunner-25818"
 KEYVAULT_SECRET_NAME="github-app-token"     # short-lived GitHub App installation token
-RUNNER_VERSION="2.321.0"                     # pin, bump deliberately
-DOTNET_CHANNEL="8.0"
+RUNNER_VERSION="2.337.0"                     # pin, bump deliberately
+DOTNET_CHANNEL="10.0"
 RUNNER_LABELS="self-hosted,linux,x64,vmss"
 RUNNER_GROUP="default"
 
