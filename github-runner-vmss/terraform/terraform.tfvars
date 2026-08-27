@@ -12,7 +12,7 @@ pep_subnet_name          = "snet-pep"
 blob_private_dns_zone_name                = "privatelink.blob.core.windows.net"
 blob_private_dns_zone_resource_group_name = "rg-network-hub"
 
-key_vault_name                = "kv-mgmt-devops"
+key_vault_name                = "kv-ghrunner-25818"
 key_vault_resource_group_name = "rg-mgmt-devops"
 
 vm_size        = "Standard_D4s_v5"
