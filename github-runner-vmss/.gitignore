@@ -1,0 +1,59 @@
+# --- Terraform ---
+**/.terraform/*
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Plan output files - may contain resource values you don't want in git
+*.tfplan
+tfplan
+
+# Local variable overrides / secrets - NOT terraform.tfvars itself, which
+# this repo commits deliberately (see README: nothing in it is sensitive,
+# just resource/subnet/VNet names). *.auto.tfvars and any tfvars.json are
+# for local overrides and commonly used to hold things that shouldn't be
+# committed, so those stay ignored.
+*.auto.tfvars
+*.auto.tfvars.json
+terraform.tfvars.json
+*.local.tfvars
+
+# --- SSH keys generated for the VMSS backend (README step 5) ---
+# The public half goes into Key Vault via `az keyvault secret set`, not
+# git. The private half should never be committed.
+ghrunner-vmss-key
+ghrunner-vmss-key.pub
+*.pem
+*.pfx
+*id_rsa*
+*id_ed25519*
+
+# --- GitHub App private key, if ever downloaded into this repo ---
+# (should live in GitHub Actions secrets, not on disk here at all -
+# this is a safety net, not the intended workflow)
+*.private-key.pem
+
+# --- Docker ---
+docker/.dockerignore.bak
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# --- Misc local scratch ---
+*.log
+.env
+.env.*

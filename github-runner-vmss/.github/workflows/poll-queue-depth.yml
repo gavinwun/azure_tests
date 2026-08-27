@@ -1,0 +1,104 @@
+name: Poll GitHub Queue Depth for VMSS Autoscale
+
+on:
+  schedule:
+    # 5 minutes is the shortest interval GitHub cron supports - actual
+    # runs can be delayed under load, same caveat as the token refresh workflow.
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: poll-queue-depth
+  cancel-in-progress: true   # a fresher count always supersedes an in-flight older one
+
+jobs:
+  publish-queue-metric:
+    if: vars.COMPUTE_BACKEND == 'vmss' || vars.COMPUTE_BACKEND == ''   # default to vmss if unset, matching the Terraform default
+    runs-on: ubuntu-latest   # must be GitHub-hosted - same bootstrapping reasoning as the token refresh workflow
+    steps:
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.RUNNER_BOOTSTRAP_APP_ID }}
+          private-key: ${{ secrets.RUNNER_BOOTSTRAP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # This App now needs "Actions: Read" org permission in addition
+          # to the "Self-hosted runners: Read and write" permission set
+          # up for the token-refresh workflow - add it under the App's
+          # permissions if it isn't already there.
+
+      - name: Count queued workflow runs
+        id: queue-count
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+        run: |
+          set -euo pipefail
+          # total_count on the org-level "list workflow runs" endpoint,
+          # filtered to queued status. This counts queued *runs*, not
+          # individual jobs within a run - a reasonable approximation
+          # for a first pass; revisit if a single workflow commonly
+          # fans out into many parallel jobs your labels would matter for.
+          COUNT=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${GITHUB_ORG}/actions/runs?status=queued&per_page=1" \
+            | jq -r '.total_count')
+          echo "queued=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Queued workflow runs: ${COUNT}"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.QUEUE_POLLER_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Publish custom metric to Azure Monitor
+        env:
+          VALUE: ${{ steps.queue-count.outputs.queued }}
+          VMSS_RESOURCE_ID: ${{ vars.VMSS_RESOURCE_ID }}     # from `terraform output vmss_id`
+          VMSS_REGION: ${{ vars.VMSS_REGION }}               # from `terraform output vmss_location`, e.g. "australiaeast"
+          METRIC_NAMESPACE: "GitHubActionsQueue"             # must match custom_metric_namespace in terraform.tfvars
+          METRIC_NAME: "QueuedJobs"                          # must match custom_metric_name in terraform.tfvars
+        run: |
+          set -euo pipefail
+
+          # Audience must be exactly https://monitoring.azure.com/ (trailing slash required)
+          TOKEN=$(az account get-access-token \
+            --resource "https://monitoring.azure.com/" \
+            --query accessToken -o tsv)
+
+          TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          BODY=$(jq -n \
+            --arg time "${TIMESTAMP}" \
+            --arg metric "${METRIC_NAME}" \
+            --arg namespace "${METRIC_NAMESPACE}" \
+            --argjson value "${VALUE}" \
+            '{
+              time: $time,
+              data: {
+                baseData: {
+                  metric: $metric,
+                  namespace: $namespace,
+                  dimNames: [],
+                  series: [
+                    { dimValues: [], min: $value, max: $value, sum: $value, count: 1 }
+                  ]
+                }
+              }
+            }')
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/json" \
+            "https://${VMSS_REGION}.monitoring.azure.com${VMSS_RESOURCE_ID}/metrics" \
+            -d "${BODY}"
+
+          echo "Published ${METRIC_NAME}=${VALUE} to ${METRIC_NAMESPACE}"

@@ -1,0 +1,142 @@
+name: Reconcile ACI Runners (ACI backend)
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: reconcile-aci-runners
+  cancel-in-progress: true
+
+env:
+  NAME_PREFIX: "gh-runner-aci"
+  TAG_KEY: "managed-by"
+  TAG_VALUE: "gh-runner-poller"
+
+jobs:
+  reconcile:
+    if: vars.COMPUTE_BACKEND == 'aci'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.RUNNER_BOOTSTRAP_APP_ID }}
+          private-key: ${{ secrets.RUNNER_BOOTSTRAP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Count queued workflow runs
+        id: queue-count
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+        run: |
+          set -euo pipefail
+          # Same caveat as the VMSS poller: counts queued *runs* org-wide,
+          # not individual jobs filtered by runner label.
+          COUNT=$(curl -s \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${GITHUB_ORG}/actions/runs?status=queued&per_page=1" \
+            | jq -r '.total_count')
+          echo "queued=${COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Queued workflow runs: ${COUNT}"
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.ACI_ORCHESTRATOR_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Clean up terminated/failed container groups
+        env:
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP_NAME }}
+        run: |
+          set -euo pipefail
+          # Every reconcile pass, delete anything that finished a job
+          # (ephemeral runner exited -> container exited -> group went
+          # Terminated) or failed outright. This is the ACI equivalent
+          # of VMSS scale-in - there's no automatic cleanup here, the
+          # group just sits there (and keeps being billed) until deleted.
+          DONE=$(az container list \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "[?tags.\"${TAG_KEY}\"=='${TAG_VALUE}' && (properties.instanceView.state=='Terminated' || properties.instanceView.state=='Failed')].name" \
+            -o tsv)
+
+          if [[ -n "${DONE}" ]]; then
+            echo "Deleting finished container groups:"
+            echo "${DONE}"
+            while IFS= read -r name; do
+              [[ -z "${name}" ]] && continue
+              az container delete --resource-group "${RESOURCE_GROUP}" --name "${name}" --yes || true
+            done <<< "${DONE}"
+          else
+            echo "Nothing to clean up"
+          fi
+
+      - name: Reconcile active container group count
+        env:
+          TARGET: ${{ steps.queue-count.outputs.queued }}
+          RESOURCE_GROUP: ${{ vars.RESOURCE_GROUP_NAME }}
+          ACR_LOGIN_SERVER: ${{ vars.ACR_LOGIN_SERVER }}
+          ACI_SUBNET_NAME: ${{ vars.ACI_SUBNET_NAME }}
+          ACI_VNET_ID: ${{ vars.ACI_VNET_ID }}
+          ACI_IDENTITY_ID: ${{ vars.ACI_IDENTITY_ID }}
+          LOCATION: ${{ vars.VMSS_REGION }}   # reused var name, just means "deployment region"
+          KEYVAULT_NAME: ${{ vars.KEYVAULT_NAME }}
+          GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+          IMAGE_TAG: ${{ vars.ACI_IMAGE_TAG || 'latest' }}
+          MIN_INSTANCES: ${{ vars.ACI_MIN_INSTANCES || '0' }}
+          MAX_INSTANCES: ${{ vars.ACI_MAX_INSTANCES || '10' }}
+          CONTAINER_CPU: ${{ vars.ACI_CONTAINER_CPU || '2' }}
+          CONTAINER_MEMORY_GB: ${{ vars.ACI_CONTAINER_MEMORY_GB || '4' }}
+        run: |
+          set -euo pipefail
+
+          ACTIVE=$(az container list \
+            --resource-group "${RESOURCE_GROUP}" \
+            --query "[?tags.\"${TAG_KEY}\"=='${TAG_VALUE}' && properties.instanceView.state=='Running'].name" \
+            -o tsv | wc -l)
+
+          DESIRED=${TARGET}
+          [[ "${DESIRED}" -lt "${MIN_INSTANCES}" ]] && DESIRED=${MIN_INSTANCES}
+          [[ "${DESIRED}" -gt "${MAX_INSTANCES}" ]] && DESIRED=${MAX_INSTANCES}
+
+          DIFF=$(( DESIRED - ACTIVE ))
+          echo "Active: ${ACTIVE}, queued: ${TARGET}, desired: ${DESIRED}, diff: ${DIFF}"
+
+          if [[ "${DIFF}" -le 0 ]]; then
+            echo "No new container groups needed"
+            exit 0
+          fi
+
+          for i in $(seq 1 "${DIFF}"); do
+            NAME="${NAME_PREFIX}-$(date +%s)-${RANDOM}"
+            echo "Creating ${NAME}"
+            az container create \
+              --resource-group "${RESOURCE_GROUP}" \
+              --name "${NAME}" \
+              --image "${ACR_LOGIN_SERVER}/gh-runner:${IMAGE_TAG}" \
+              --acr-identity "${ACI_IDENTITY_ID}" \
+              --assign-identity "${ACI_IDENTITY_ID}" \
+              --cpu "${CONTAINER_CPU}" \
+              --memory "${CONTAINER_MEMORY_GB}" \
+              --os-type Linux \
+              --restart-policy Never \
+              --vnet "${ACI_VNET_ID}" \
+              --subnet "${ACI_SUBNET_NAME}" \
+              --location "${LOCATION}" \
+              --environment-variables \
+                GITHUB_ORG="${GITHUB_ORG}" \
+                KEYVAULT_NAME="${KEYVAULT_NAME}" \
+                KEYVAULT_SECRET_NAME="github-app-token" \
+              --tags "${TAG_KEY}=${TAG_VALUE}" \
+              --no-wait
+          done
