@@ -132,6 +132,20 @@ jobs:
         id: runnerip
         run: echo "ip=$(curl -fsS https://api.ipify.org)" >> "$GITHUB_OUTPUT"
 
+      # Open the storage firewall in a targeted apply first. A -target apply
+      # only refreshes the account (and its deps), NOT the private blob - a
+      # full apply here would try to HEAD bootstrap_agent.sh over the public
+      # endpoint that is still disabled at refresh time and 403. Once the
+      # account is reachable, the untargeted apply below uploads the script.
+      - name: Terraform Apply (open storage firewall only)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply -auto-approve -input=false -var-file="terraform.tfvars" \
+            -target=azurerm_storage_account.bootstrap \
+            -var="bootstrap_storage_public_network_access_enabled=true" \
+            -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'
+          sleep 30   # let the firewall change propagate on the data plane
+
       - name: Terraform Apply (storage public endpoint open for script upload)
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
@@ -160,6 +174,13 @@ jobs:
           fi
           az storage account update --name "$ACCT" --resource-group "$RG" \
             --public-network-access Disabled --default-action Deny >/dev/null
+          # Also drop any IP allow-rules left behind by a half-finished open
+          # apply, so the next run's refresh/plan doesn't carry a stale IP.
+          for ip in $(az storage account network-rule list --account-name "$ACCT" \
+              --resource-group "$RG" --query "ipRules[].ipAddressOrRange" -o tsv); do
+            az storage account network-rule remove --account-name "$ACCT" \
+              --resource-group "$RG" --ip-address "$ip" >/dev/null
+          done
           echo "Locked public endpoint on $ACCT"
 
       - name: Show outputs
