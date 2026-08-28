@@ -378,8 +378,8 @@ else
   # Data-plane RBAC (your Secrets Officer grant just above) can take a
   # minute or two to be usable - retry rather than fail the whole run.
   if [[ "$DRY_RUN" == "1" ]] || \
-     ( retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-public-key  --value "$pub_val"  -o none && \
-       retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-private-key --value "$priv_val" -o none ); then
+     ( retry 6 20 -- kv_secret_set "$KV_NAME" vmss-ssh-public-key  "$pub_val" && \
+       retry 6 20 -- kv_secret_set "$KV_NAME" vmss-ssh-private-key "$priv_val" ); then
     ok "stored vmss-ssh-public-key / vmss-ssh-private-key"
     state_set CREATED_SSH_SECRETS "1"
   else
@@ -585,8 +585,7 @@ if [[ "$SEED_TOKEN" == "1" ]]; then
     warn "no installation token minted - github-app-token NOT seeded (see above)."
   else
     exp=$(date -u -d '+55 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+55M +%Y-%m-%dT%H:%M:%SZ)
-    if [[ "$DRY_RUN" == "1" ]] || retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" \
-         --name github-app-token --value "$tok" --expires "$exp" -o none; then
+    if [[ "$DRY_RUN" == "1" ]] || retry 6 20 -- kv_secret_set "$KV_NAME" github-app-token "$tok" --expires "$exp"; then
       ok "stored github-app-token (expires $exp; the refresh workflow keeps it fresh from here)"
     else
       ROLE_FAILURES=$((ROLE_FAILURES + 1))

@@ -157,6 +157,21 @@ ensure_role() {
   fi
 }
 
+kv_secret_set() {
+  # kv_secret_set <vault> <name> <value> [extra az args...]
+  # Recovering a soft-deleted vault leaves its old secrets in a
+  # "deleted but recoverable" state - a plain `secret set` then fails with
+  # ObjectIsDeletedButRecoverable. Recover the same-named secret first.
+  local vault="$1" name="$2" value="$3"; shift 3
+  if ! az keyvault secret show --vault-name "$vault" --name "$name" >/dev/null 2>&1 \
+     && az keyvault secret list-deleted --vault-name "$vault" \
+          --query "[?name=='$name'] | [0].id" -o tsv 2>/dev/null | grep -q .; then
+    az keyvault secret recover --vault-name "$vault" --name "$name" -o none 2>/dev/null || true
+    sleep 5   # recovery is async
+  fi
+  az keyvault secret set --vault-name "$vault" --name "$name" --value "$value" -o none "$@"
+}
+
 ensure_group() {
   # ensure_group <name> <location>
   if [[ "$(az group exists --name "$1" 2>/dev/null)" == "true" ]]; then
