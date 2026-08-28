@@ -617,6 +617,17 @@ workflow carrying that blast radius.
    credential back in step 2 above, or the gated `apply` job will fail
    OIDC login once it actually runs.
 
+   CLI equivalent (needs `gh` with admin on the repo):
+   ```bash
+   # bare environment (no gate)
+   gh api --method PUT repos/<owner>/<repo>/environments/production
+   # ...with yourself as a required reviewer
+   gh api --method PUT repos/<owner>/<repo>/environments/production \
+     --input - <<< "{\"reviewers\":[{\"type\":\"User\",\"id\":$(gh api user --jq .id)}]}"
+   ```
+   `setup/bootstrap.sh --set-github` creates the bare environment; add
+   `--env-require-self-review` to include the reviewer rule.
+
 6. `terraform.tfvars` is already committed in this bundle with placeholder
    values (nothing in it is sensitive - just resource/subnet/VNet names).
    Edit it with your real values before merging.

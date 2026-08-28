@@ -53,6 +53,37 @@ cd github-runner-vmss/setup
 
 Re-running is safe: anything that already exists is detected and skipped.
 
+### The `production` deployment environment
+
+With `--set-github`, `bootstrap.sh` creates the `production` environment
+(README step 7.5) as a **bare** environment — no protection rules, so the
+`apply` job runs automatically on merge to `main`.
+
+Add `--env-require-self-review` to also register **you** as a required
+reviewer, so every `apply` pauses for your manual approval:
+
+```bash
+./bootstrap.sh --subscription-id <SUB_ID> \
+  --github-app-id <APP_ID> \
+  --github-app-private-key-file ../<app>.private-key.pem \
+  --set-github --env-require-self-review
+```
+
+Equivalent by hand, without re-running bootstrap:
+
+```bash
+# bare environment
+gh api --method PUT repos/<owner>/<repo>/environments/production
+
+# with yourself as required reviewer
+gh api --method PUT repos/<owner>/<repo>/environments/production \
+  --input - <<< "{\"reviewers\":[{\"type\":\"User\",\"id\":$(gh api user --jq .id)}]}"
+```
+
+The environment is optional. If you skip it entirely, drop the
+`tf-deploy-production-env` federated credential too — it's only used when
+the environment gate is active.
+
 ### Federated-credential subject format
 
 Repos created after 2026-07-15 (or opted in) issue *immutable* OIDC

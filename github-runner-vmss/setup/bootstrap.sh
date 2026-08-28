@@ -47,6 +47,7 @@ TFSTATE_CONTAINER="tfstate"
 WITH_POLLER=0
 SET_GITHUB=0
 SEED_TOKEN=0
+ENV_SELF_REVIEW=0
 DRY_RUN=0
 ASSUME_YES=0
 
@@ -74,6 +75,7 @@ Common options:
   --tfstate-container <name>     tfstate blob container (default: $TFSTATE_CONTAINER).
   --with-poller                  Also create the queue-poller identity (README optional section B).
   --set-github                   Also set repo variables/secrets and create the 'production' env (needs gh).
+  --env-require-self-review      With --set-github: add you as a required reviewer on the environment.
   --seed-token                   Mint an installation token now and store it as the github-app-token secret.
   --dry-run                      Print what would run without changing anything.
   --yes                          Don't prompt for confirmation.
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
     --tfstate-container) TFSTATE_CONTAINER="$2"; shift 2 ;;
     --with-poller) WITH_POLLER=1; shift ;;
     --set-github) SET_GITHUB=1; shift ;;
+    --env-require-self-review) ENV_SELF_REVIEW=1; shift ;;
     --seed-token) SEED_TOKEN=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes|-y) ASSUME_YES=1; shift ;;
@@ -418,9 +421,22 @@ if [[ "$SET_GITHUB" == "1" ]]; then
     warn "no --github-app-private-key-file: skipped RUNNER_BOOTSTRAP_APP_PRIVATE_KEY."
   fi
 
-  run gh api -X PUT "repos/$GH_REPO/environments/$ENVIRONMENT" -o none 2>/dev/null \
-    && ok "environment '$ENVIRONMENT' exists (add required reviewers in the UI)" \
-    || warn "could not create environment '$ENVIRONMENT' (needs admin on the repo)."
+  # Create the deployment environment. With --env-require-self-review, also
+  # add you as a required reviewer so the apply job pauses for approval
+  # (README step 7.5); otherwise it's created with no protection rules and
+  # you add reviewers in the repo UI.
+  env_body='{}'
+  if [[ "${ENV_SELF_REVIEW:-0}" == "1" ]]; then
+    my_uid=$(gh api user --jq '.id' 2>/dev/null || true)
+    [[ -n "$my_uid" ]] && env_body="{\"reviewers\":[{\"type\":\"User\",\"id\":$my_uid}]}"
+  fi
+  if printf '%s' "$env_body" | run gh api --method PUT "repos/$GH_REPO/environments/$ENVIRONMENT" --input - --silent; then
+    ok "environment '$ENVIRONMENT' created${ENV_SELF_REVIEW:+ (you set as required reviewer)}"
+  else
+    warn "could not create environment '$ENVIRONMENT'. Do it by hand:"
+    warn "  gh api --method PUT repos/$GH_REPO/environments/$ENVIRONMENT"
+    warn "  (or repo Settings -> Environments -> New environment)"
+  fi
   state_set GITHUB_CONFIGURED "1"
 fi
 
