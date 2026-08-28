@@ -1,0 +1,71 @@
+name: Self-Hosted Runner Smoke Test
+
+# Sanity-checks that the self-hosted runners (VMSS or ACI) pick up jobs and
+# have the tooling we expect. Runs on demand, and on a daily schedule so a
+# broken scale set surfaces before someone needs it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner_label:
+        description: "Which runner pool to target"
+        type: choice
+        default: vmss
+        options:
+          - vmss
+          - aci
+  schedule:
+    - cron: "0 7 * * *"   # 07:00 UTC daily
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-hosted-runner-test-${{ github.ref }}-${{ github.event.inputs.runner_label || 'vmss' }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    # schedule/other events have no inputs, so fall back to the vmss pool
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - ${{ github.event.inputs.runner_label || 'vmss' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Runner identity
+        run: |
+          echo "Runner name : ${RUNNER_NAME}"
+          echo "Runner OS   : ${RUNNER_OS} / $(uname -m)"
+          echo "Labels      : self-hosted, linux, x64, ${{ github.event.inputs.runner_label || 'vmss' }}"
+          echo "Workdir     : ${RUNNER_WORKSPACE}"
+          echo "Kernel      : $(uname -a)"
+
+      - name: Host resources
+        run: |
+          echo "--- CPU ---"; nproc
+          echo "--- Memory ---"; free -h || cat /proc/meminfo | head -3
+          echo "--- Disk ---"; df -h "${RUNNER_WORKSPACE:-$PWD}" .
+
+      - name: Tooling present
+        run: |
+          set -x
+          git --version
+          docker version --format '{{.Server.Version}}' || echo "docker: not available"
+          az version || echo "az: not available"
+          jq --version || echo "jq: not available"
+          curl --version | head -1
+
+      - name: Outbound network
+        run: |
+          curl -fsS -o /dev/null -w "github.com  -> %{http_code}\n" https://github.com
+          curl -fsS -o /dev/null -w "ipify       -> %{http_code}\n" https://api.ipify.org
+
+      - name: Workload
+        run: |
+          echo "Running a trivial compute step to prove job execution..."
+          python3 -c "print(sum(range(1_000_000)))" || awk 'BEGIN{s=0;for(i=0;i<1000000;i++)s+=i;print s}'
+          echo "Self-hosted runner smoke test passed on ${RUNNER_NAME}."

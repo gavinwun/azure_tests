@@ -110,7 +110,7 @@ variable "key_vault_resource_group_name" {
 variable "vm_size" {
   description = "VMSS instance SKU."
   type        = string
-  default     = "Standard_D4s_v5"
+  default     = "Standard_B2als_v2"
 }
 
 variable "instance_count" {
