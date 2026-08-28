@@ -133,9 +133,9 @@ variable "github_org" {
 # Neither of the next two is consumed by Terraform (nothing here templates
 # bootstrap_agent.sh - it's hand-edited, README step 6). They live here so
 # terraform.tfvars documents the values that bootstrap_agent.sh /
-# entrypoint.sh and the GITHUB_RUNNER_SCOPE repo variable must agree on.
+# entrypoint.sh and the RUNNER_SCOPE repo variable must agree on.
 variable "github_runner_scope" {
-  description = "Where instances register as runners: \"org\" (organisation-level; GitHub App needs Organization -> Self-hosted runners: Read and write) or \"repo\" (single repository - required for a personal account, which has no org runners; App needs Repository -> Administration: Read and write). Must match GITHUB_SCOPE in bootstrap_agent.sh / entrypoint.sh and the GITHUB_RUNNER_SCOPE repo variable."
+  description = "Where instances register as runners: \"org\" (organisation-level; GitHub App needs Organization -> Self-hosted runners: Read and write) or \"repo\" (single repository - required for a personal account, which has no org runners; App needs Repository -> Administration: Read and write). Must match GITHUB_SCOPE in bootstrap_agent.sh / entrypoint.sh and the RUNNER_SCOPE repo variable."
   type        = string
   default     = "org"
 

@@ -35,18 +35,18 @@ jobs:
         id: queue-count
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RUNNER_SCOPE: ${{ vars.GITHUB_RUNNER_SCOPE || 'org' }}
-          GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+          RUNNER_SCOPE: ${{ vars.RUNNER_SCOPE || 'org' }}
+          OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # Same caveat as the VMSS poller: counts queued *runs*, not
           # label-filtered jobs. Org-wide, or this-repo-only when
-          # GITHUB_RUNNER_SCOPE=repo (personal account).
+          # RUNNER_SCOPE=repo (personal account).
           if [ "${RUNNER_SCOPE}" = "repo" ]; then
             API_BASE="https://api.github.com/repos/${TARGET_REPO}"
           else
-            API_BASE="https://api.github.com/orgs/${GITHUB_ORG}"
+            API_BASE="https://api.github.com/orgs/${OWNER}"
           fi
           COUNT=$(curl -s \
             -H "Authorization: Bearer ${GH_TOKEN}" \
@@ -99,8 +99,8 @@ jobs:
           ACI_IDENTITY_ID: ${{ vars.ACI_IDENTITY_ID }}
           LOCATION: ${{ vars.VMSS_REGION }}   # reused var name, just means "deployment region"
           KEYVAULT_NAME: ${{ vars.KEYVAULT_NAME }}
-          RUNNER_SCOPE: ${{ vars.GITHUB_RUNNER_SCOPE || 'org' }}
-          GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+          RUNNER_SCOPE: ${{ vars.RUNNER_SCOPE || 'org' }}
+          OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ github.repository }}
           IMAGE_TAG: ${{ vars.ACI_IMAGE_TAG || 'latest' }}
           MIN_INSTANCES: ${{ vars.ACI_MIN_INSTANCES || '0' }}
@@ -145,7 +145,7 @@ jobs:
               --location "${LOCATION}" \
               --environment-variables \
                 GITHUB_SCOPE="${RUNNER_SCOPE}" \
-                GITHUB_ORG="${GITHUB_ORG}" \
+                GITHUB_ORG="${OWNER}" \
                 GITHUB_REPO="${TARGET_REPO}" \
                 KEYVAULT_NAME="${KEYVAULT_NAME}" \
                 KEYVAULT_SECRET_NAME="github-app-token" \

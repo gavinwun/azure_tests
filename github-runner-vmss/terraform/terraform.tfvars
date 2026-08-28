@@ -39,7 +39,7 @@ environment = "production"
 # "repo": runners register on a single repo - use this for a PERSONAL
 #   account (no org runners); App needs Repository -> Administration: R/W,
 #   and github_repo below must be set. Keep in sync with GITHUB_SCOPE in
-#   terraform/scripts/bootstrap_agent.sh and the GITHUB_RUNNER_SCOPE repo
+#   terraform/scripts/bootstrap_agent.sh and the RUNNER_SCOPE repo
 #   variable.
 github_runner_scope = "repo"
 github_repo         = "gavinwun/azure_tests"

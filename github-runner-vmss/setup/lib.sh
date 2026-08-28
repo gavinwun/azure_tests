@@ -39,6 +39,22 @@ skip()  { printf '    %s•%s %s%s%s\n' "$_c_dim" "$_c_reset" "$_c_dim" "$*" "$_
 warn()  { printf '    %s!%s %s\n' "$_c_ylw" "$_c_reset" "$*" >&2; }
 die()   { printf '\n%sERROR:%s %s\n' "$_c_red$_c_bold" "$_c_reset" "$*" >&2; exit 1; }
 
+# Deferred manual steps - collected during the run, printed together at the
+# end so nothing that needs a human is buried in scrollback. Each entry may
+# be multi-line; continuation lines are indented when printed.
+MANUAL_STEPS=()
+manual_step() { MANUAL_STEPS+=("$1"); }
+print_manual_steps() {
+  [[ ${#MANUAL_STEPS[@]} -eq 0 ]] && return 0
+  printf '\n%s%s╍╍╍ manual steps still needed ╍╍╍%s\n' "$_c_ylw" "$_c_bold" "$_c_reset"
+  local i=1 s
+  for s in "${MANUAL_STEPS[@]}"; do
+    printf '\n%s%2d.%s %s\n' "$_c_bold" "$i" "$_c_reset" "${s//$'\n'/$'\n'     }"
+    i=$((i + 1))
+  done
+  printf '\n'
+}
+
 # DRY_RUN is set by the calling script from --dry-run.
 run() {
   if [[ "${DRY_RUN:-0}" == "1" ]]; then

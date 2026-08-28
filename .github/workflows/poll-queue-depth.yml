@@ -36,21 +36,21 @@ jobs:
         id: queue-count
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RUNNER_SCOPE: ${{ vars.GITHUB_RUNNER_SCOPE || 'org' }}
-          GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+          RUNNER_SCOPE: ${{ vars.RUNNER_SCOPE || 'org' }}
+          OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           # total_count on the "list workflow runs" endpoint, filtered to
           # queued status - org-wide, or this-repo-only when
-          # GITHUB_RUNNER_SCOPE=repo (personal account). Counts queued
-          # *runs*, not individual jobs within a run - a reasonable
-          # approximation for a first pass; revisit if a single workflow
-          # commonly fans out into many parallel jobs your labels matter for.
+          # RUNNER_SCOPE=repo (personal account). Counts queued *runs*, not
+          # individual jobs within a run - a reasonable approximation for a
+          # first pass; revisit if a single workflow commonly fans out into
+          # many parallel jobs your labels matter for.
           if [ "${RUNNER_SCOPE}" = "repo" ]; then
             API_BASE="https://api.github.com/repos/${TARGET_REPO}"
           else
-            API_BASE="https://api.github.com/orgs/${GITHUB_ORG}"
+            API_BASE="https://api.github.com/orgs/${OWNER}"
           fi
           COUNT=$(curl -s \
             -H "Authorization: Bearer ${GH_TOKEN}" \

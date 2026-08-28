@@ -90,7 +90,7 @@ the environment gate is active.
 an organisation: a **personal account** gets `repo` (single-repo runners —
 it has no org-level runners), an **org** gets `org`. Pass
 `--runner-scope org|repo` to force it. With `--set-github` this is written
-to the `GITHUB_RUNNER_SCOPE` repo variable; you still edit
+to the `RUNNER_SCOPE` repo variable; you still edit
 `terraform/scripts/bootstrap_agent.sh` (`GITHUB_SCOPE` / `GITHUB_REPO`)
 and `terraform.tfvars` (`github_runner_scope` / `github_repo`) to match,
 and the GitHub App permission in README step 1 depends on it (Organization

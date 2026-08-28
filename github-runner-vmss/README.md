@@ -94,9 +94,8 @@ cd setup
 ```
 
 It auto-detects the runner scope (`--runner-scope auto` → `repo` for a
-personal account, `org` for an organisation) and sets the
-`GITHUB_RUNNER_SCOPE` repo variable; pass `--runner-scope org|repo` to
-override. Full flag list, the `--env-require-self-review` option, and the
+personal account, `org` for an organisation) and sets the `RUNNER_SCOPE`
+repo variable; pass `--runner-scope org|repo` to override. Full flag list, the `--env-require-self-review` option, and the
 matching `teardown.sh`: [`setup/README.md`](setup/README.md). Re-running
 is safe - anything that already exists is detected and skipped. When it
 finishes, skip to [step 8 (Push and merge)](#8-push-and-merge).
@@ -402,16 +401,20 @@ Keep these three in sync across the places that need them:
 
 | Setting | `bootstrap_agent.sh` / `entrypoint.sh` | `terraform.tfvars` | Repo variable |
 |---|---|---|---|
-| scope | `GITHUB_SCOPE` | `github_runner_scope` | `GITHUB_RUNNER_SCOPE` |
-| org | `GITHUB_ORG` | `github_org` | `GITHUB_ORG` |
-| repo | `GITHUB_REPO` | `github_repo` | *(workflows use `github.repository`)* |
+| scope | `GITHUB_SCOPE` | `github_runner_scope` | `RUNNER_SCOPE` |
+| org | `GITHUB_ORG` | `github_org` | *(none — workflows use `github.repository_owner`)* |
+| repo | `GITHUB_REPO` | `github_repo` | *(none — workflows use `github.repository`)* |
+
+GitHub rejects variable/secret names starting with `GITHUB_`, so there is
+no `GITHUB_ORG` repo variable — the workflows read the owner from
+`${{ github.repository_owner }}` directly.
 
 The GitHub App permission in step 1 follows from the scope: **Organization
 → Self-hosted runners** for `"org"`, **Repository → Administration** for
 `"repo"`. `setup/bootstrap.sh` picks the scope automatically (`--runner-scope
 auto`, based on whether the owner is a user or an org) and sets the
-`GITHUB_RUNNER_SCOPE` repo variable; you still edit `bootstrap_agent.sh`
-by hand to match.
+`RUNNER_SCOPE` repo variable; you still edit `bootstrap_agent.sh` by hand
+to match.
 
 ### 7. Set up remote state + a second OIDC identity for the deploy pipeline
 
@@ -850,8 +853,7 @@ az role assignment create \
 | `QUEUE_POLLER_AZURE_CLIENT_ID` | App registration client ID from step B |
 | `VMSS_RESOURCE_ID` | output of `terraform output -raw vmss_id` |
 | `VMSS_REGION` | output of `terraform output -raw vmss_location`, e.g. `australiaeast` |
-| `GITHUB_ORG` | your org name (same value as `github_org` in tfvars) — used only when `GITHUB_RUNNER_SCOPE=org` |
-| `GITHUB_RUNNER_SCOPE` | `org` or `repo` (default `org` if unset). `repo` makes the poller count queued runs for this repo only. Set by `setup/bootstrap.sh --set-github`. |
+| `RUNNER_SCOPE` | `org` (default if unset) or `repo`. `repo` makes the poller count queued runs for this repo only, not org-wide. Set by `setup/bootstrap.sh --set-github`. The owner comes from `github.repository_owner` — there is no `GITHUB_ORG` variable (GitHub rejects the `GITHUB_` prefix). |
 
 ### D. Apply and verify
 
@@ -1022,8 +1024,7 @@ VMSS backend's poller.
 | `ACI_IDENTITY_ID` | `terraform output -raw aci_identity_id` |
 | `VMSS_REGION` | deployment region, e.g. `australiaeast` (reused variable name - just means "region" here, not VMSS-specific) |
 | `KEYVAULT_NAME` | same Key Vault as the base setup |
-| `GITHUB_ORG` | same as the VMSS setup (used only when `GITHUB_RUNNER_SCOPE=org`) |
-| `GITHUB_RUNNER_SCOPE` | `org` or `repo` (default `org`). `repo` makes containers register on this repo and needs the App's Repository → Administration permission. Same value as the VMSS setup. |
+| `RUNNER_SCOPE` | `org` (default) or `repo`. `repo` makes containers register on this repo and needs the App's Repository → Administration permission. Same value as the VMSS setup. Owner comes from `github.repository_owner`; no `GITHUB_ORG` variable. |
 | `ACI_MIN_INSTANCES` / `ACI_MAX_INSTANCES` | optional, default 0 / 10 |
 | `ACI_CONTAINER_CPU` / `ACI_CONTAINER_MEMORY_GB` | optional, default 2 / 4 |
 | `ACI_IMAGE_TAG` | optional, default `latest` |

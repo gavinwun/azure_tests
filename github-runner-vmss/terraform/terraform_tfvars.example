@@ -32,7 +32,7 @@ environment = "dev"
 
 # "org" (default): runners register org-wide. "repo": single repo, for a
 # personal account - set github_repo and keep in sync with GITHUB_SCOPE in
-# bootstrap_agent.sh / entrypoint.sh and the GITHUB_RUNNER_SCOPE repo var.
+# bootstrap_agent.sh / entrypoint.sh and the RUNNER_SCOPE repo var.
 github_runner_scope = "org"
 github_repo         = ""   # "owner/repo", required when github_runner_scope = "repo"
 

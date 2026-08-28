@@ -18,7 +18,7 @@
 #
 # Runner scope: --runner-scope auto (default) registers runners org-level
 # for an organisation, repo-level for a personal account; force it with
-# --runner-scope org|repo. --set-github writes it to the GITHUB_RUNNER_SCOPE
+# --runner-scope org|repo. --set-github writes it to the RUNNER_SCOPE
 # repo variable. You still edit terraform/scripts/bootstrap_agent.sh
 # (GITHUB_SCOPE / GITHUB_ORG / GITHUB_REPO) and terraform.tfvars to match
 # (README step 6); the GitHub App permission depends on it (Organization ->
@@ -86,7 +86,7 @@ Common options:
   --github-app-private-key-file <path>   The App's .pem. Needed for --set-github/--seed-token.
   --subject-format auto|plain|immutable  Federated-credential subject style (default: auto = both).
   --runner-scope auto|org|repo   Where runners register (default: auto - detects user vs org).
-                                 "repo" for a personal account; sets the GITHUB_RUNNER_SCOPE repo var.
+                                 "repo" for a personal account; sets the RUNNER_SCOPE repo var.
   --tfstate-rg <name>            Resource group for the tfstate account (default: management RG).
   --tfstate-account <name>       tfstate storage account. Default: reuse state.env, else a name
                                 from the subscription id, else an available random one.
@@ -366,10 +366,13 @@ fi
 step "VMSS SSH key pair -> Key Vault"
 if [[ "$DRY_RUN" != "1" ]] && az keyvault secret show --vault-name "$KV_NAME" --name vmss-ssh-public-key >/dev/null 2>&1; then
   skip "secret vmss-ssh-public-key already present"
+elif [[ "$DRY_RUN" == "1" ]]; then
+  run az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-public-key  --value "<generated>" -o none
+  run az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-private-key --value "<generated>" -o none
 else
   need ssh-keygen
   tmpkey="$(mktemp -d)/ghrunner-vmss-key"
-  run ssh-keygen -t ed25519 -f "$tmpkey" -N "" -q
+  ssh-keygen -t ed25519 -f "$tmpkey" -N "" -q
   # Pass the key material as --value, NOT --file: under WSL the `az` on
   # PATH is often the Windows az.exe, which can't open a Linux /tmp path
   # ("[Errno 2] No such file or directory"). --value works either way.
@@ -377,8 +380,7 @@ else
   priv_val="$(cat "$tmpkey")"
   # Data-plane RBAC (your Secrets Officer grant just above) can take a
   # minute or two to be usable - retry rather than fail the whole run.
-  if [[ "$DRY_RUN" == "1" ]] || \
-     ( retry 6 20 -- kv_secret_set "$KV_NAME" vmss-ssh-public-key  "$pub_val" && \
+  if ( retry 6 20 -- kv_secret_set "$KV_NAME" vmss-ssh-public-key  "$pub_val" && \
        retry 6 20 -- kv_secret_set "$KV_NAME" vmss-ssh-private-key "$priv_val" ); then
     ok "stored vmss-ssh-public-key / vmss-ssh-private-key"
     state_set CREATED_SSH_SECRETS "1"
@@ -387,10 +389,8 @@ else
     warn "could not write the SSH secrets (Key Vault data-plane access not ready?). Re-run bootstrap.sh shortly."
   fi
   unset pub_val priv_val
-  if [[ "$DRY_RUN" != "1" ]]; then
-    command -v shred >/dev/null 2>&1 && shred -u "$tmpkey" "$tmpkey.pub" 2>/dev/null || rm -f "$tmpkey" "$tmpkey.pub"
-    rmdir "$(dirname "$tmpkey")" 2>/dev/null || true
-  fi
+  command -v shred >/dev/null 2>&1 && shred -u "$tmpkey" "$tmpkey.pub" 2>/dev/null || rm -f "$tmpkey" "$tmpkey.pub"
+  rmdir "$(dirname "$tmpkey")" 2>/dev/null || true
 fi
 
 # ---------------------------------------------------------------------------
@@ -491,9 +491,11 @@ if [[ "$WITH_POLLER" == "1" ]]; then
   step "App: $APP_POLLER"
   read -r POLLER_APPID POLLER_OBJID < <(ensure_app "$APP_POLLER")
   add_fics "$POLLER_OBJID" "queue-poller" "ref:refs/heads/main"
-  warn "Grant 'Monitoring Metrics Publisher' to $APP_POLLER on the VMSS AFTER the first terraform apply:"
-  warn "  az role assignment create --assignee $POLLER_APPID --role 'Monitoring Metrics Publisher' \\"
-  warn "    --scope \$(terraform -chdir=../terraform output -raw vmss_id)"
+  manual_step "Grant '$APP_POLLER' the 'Monitoring Metrics Publisher' role on the VMSS,
+AFTER the first successful 'terraform apply' (the VMSS must exist):
+  az role assignment create --assignee ${POLLER_APPID:-<poller-client-id>} \\
+    --role 'Monitoring Metrics Publisher' \\
+    --scope \$(terraform -chdir=../terraform output -raw vmss_id)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -504,8 +506,9 @@ if [[ "$SET_GITHUB" == "1" ]]; then
   need gh
   gh auth status >/dev/null 2>&1 || die "'gh' is not logged in. Run: gh auth login"
 
-  gh_var()    { run gh variable set "$1" --repo "$GH_REPO" --body "$2" && ok "variable $1"; }
-  gh_secret() { run gh secret   set "$1" --repo "$GH_REPO" --body "$2" && ok "secret   $1"; }
+  # non-fatal: one bad name (e.g. a reserved prefix) shouldn't abort the run
+  gh_var()    { if run gh variable set "$1" --repo "$GH_REPO" --body "$2"; then ok "variable $1"; else ROLE_FAILURES=$((ROLE_FAILURES+1)); warn "could not set variable $1"; fi; }
+  gh_secret() { if run gh secret   set "$1" --repo "$GH_REPO" --body "$2"; then ok "secret   $1"; else ROLE_FAILURES=$((ROLE_FAILURES+1)); warn "could not set secret $1"; fi; }
 
   gh_var AZURE_TENANT_ID        "$TENANT_ID"
   gh_var AZURE_SUBSCRIPTION_ID  "$SUBSCRIPTION_ID"
@@ -515,19 +518,24 @@ if [[ "$SET_GITHUB" == "1" ]]; then
   gh_var TFSTATE_RESOURCE_GROUP "$TFSTATE_RG"
   gh_var TFSTATE_STORAGE_ACCOUNT "$TFSTATE_ACCOUNT"
   gh_var TFSTATE_CONTAINER      "$TFSTATE_CONTAINER"
-  gh_var GITHUB_ORG            "$GITHUB_ORG"
-  gh_var GITHUB_RUNNER_SCOPE   "$RUNNER_SCOPE"
+  # No GITHUB_ORG variable - GitHub rejects the "GITHUB_" name prefix, and the
+  # workflows read the owner from ${{ github.repository_owner }} directly.
+  gh_var RUNNER_SCOPE          "$RUNNER_SCOPE"
   [[ "$WITH_POLLER" == "1" ]] && gh_var QUEUE_POLLER_AZURE_CLIENT_ID "${POLLER_APPID:-}"
 
   if [[ -n "$GITHUB_APP_ID" ]]; then
     gh_var RUNNER_BOOTSTRAP_APP_ID "$GITHUB_APP_ID"
   else
-    warn "no --github-app-id: skipped RUNNER_BOOTSTRAP_APP_ID (set it once the GitHub App exists)."
+    warn "no --github-app-id: skipped RUNNER_BOOTSTRAP_APP_ID"
+    manual_step "Set repo variable RUNNER_BOOTSTRAP_APP_ID to the GitHub App's App ID once the App exists:
+  gh variable set RUNNER_BOOTSTRAP_APP_ID --repo $GH_REPO --body <app-id>"
   fi
   if [[ -n "$GITHUB_APP_KEY_FILE" && -f "$GITHUB_APP_KEY_FILE" ]]; then
     run gh secret set RUNNER_BOOTSTRAP_APP_PRIVATE_KEY --repo "$GH_REPO" < "$GITHUB_APP_KEY_FILE" && ok "secret   RUNNER_BOOTSTRAP_APP_PRIVATE_KEY"
   else
-    warn "no --github-app-private-key-file: skipped RUNNER_BOOTSTRAP_APP_PRIVATE_KEY."
+    warn "no --github-app-private-key-file: skipped RUNNER_BOOTSTRAP_APP_PRIVATE_KEY"
+    manual_step "Set repo secret RUNNER_BOOTSTRAP_APP_PRIVATE_KEY to the GitHub App's private key (.pem):
+  gh secret set RUNNER_BOOTSTRAP_APP_PRIVATE_KEY --repo $GH_REPO < <app-private-key>.pem"
   fi
 
   # Create the deployment environment. With --env-require-self-review, also
@@ -542,9 +550,9 @@ if [[ "$SET_GITHUB" == "1" ]]; then
   if printf '%s' "$env_body" | run gh api --method PUT "repos/$GH_REPO/environments/$ENVIRONMENT" --input - --silent; then
     ok "environment '$ENVIRONMENT' created${ENV_SELF_REVIEW:+ (you set as required reviewer)}"
   else
-    warn "could not create environment '$ENVIRONMENT'. Do it by hand:"
-    warn "  gh api --method PUT repos/$GH_REPO/environments/$ENVIRONMENT"
-    warn "  (or repo Settings -> Environments -> New environment)"
+    warn "could not create environment '$ENVIRONMENT'"
+    manual_step "Create the '$ENVIRONMENT' deployment environment (repo Settings -> Environments), or:
+  gh api --method PUT repos/$GH_REPO/environments/$ENVIRONMENT"
   fi
   state_set GITHUB_CONFIGURED "1"
 fi
@@ -574,9 +582,10 @@ if [[ "$SEED_TOKEN" == "1" ]]; then
   tok=""
   if [[ -z "$inst_id" ]]; then
     ROLE_FAILURES=$((ROLE_FAILURES + 1))
-    warn "GitHub App (id $GITHUB_APP_ID) has no installation on $GH_REPO / $GITHUB_ORG."
-    warn "Install it (App settings -> Install App), then re-run with --seed-token,"
-    warn "or just run the 'Refresh GitHub App Token in Key Vault' workflow once."
+    warn "GitHub App (id $GITHUB_APP_ID) has no installation on $GH_REPO / $GITHUB_ORG - github-app-token not seeded."
+    manual_step "Install the GitHub App (App settings -> Install App) on $GH_REPO, then either
+re-run bootstrap.sh with --seed-token, or run the 'Refresh GitHub App Token
+in Key Vault' workflow once from the repo's Actions tab."
   else
     tok=$(gh_api -X POST "https://api.github.com/app/installations/$inst_id/access_tokens" | jq -r '.token // empty')
   fi
@@ -595,6 +604,32 @@ if [[ "$SEED_TOKEN" == "1" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Collect the remaining manual steps (some were already queued inline above)
+# ---------------------------------------------------------------------------
+if [[ "$SET_GITHUB" != "1" ]]; then
+  manual_step "Set the GitHub repo variables + secrets and create the '$ENVIRONMENT'
+environment (README steps 3, 7.4, 7.5) - or re-run bootstrap.sh with --set-github."
+fi
+if [[ -z "$GITHUB_APP_ID" ]]; then
+  manual_step "Create the GitHub App, set its permissions for runner scope '$RUNNER_SCOPE'
+($([[ "$RUNNER_SCOPE" == repo ]] && echo 'Repository -> Administration' || echo 'Organization -> Self-hosted runners'): Read and write), install it, and download its
+private key (README step 1). Then re-run with --github-app-id / --github-app-private-key-file."
+fi
+if [[ "$SEED_TOKEN" != "1" ]]; then
+  manual_step "Seed the github-app-token Key Vault secret: run the 'Refresh GitHub App Token
+in Key Vault' workflow once (repo Actions tab), or re-run bootstrap.sh with --seed-token."
+fi
+manual_step "Confirm terraform/scripts/bootstrap_agent.sh matches this setup:
+GITHUB_SCOPE=\"$RUNNER_SCOPE\"$([[ "$RUNNER_SCOPE" == repo ]] && echo "  GITHUB_REPO=\"$GH_REPO\"" || echo "  GITHUB_ORG=\"$GITHUB_ORG\"")
+KEYVAULT_NAME=\"$KV_NAME\"   RUNNER_VERSION=<pin from github.com/actions/runner/releases>  (README step 6)."
+if [[ "$WITH_POLLER" == "1" ]]; then
+  manual_step "After the first 'terraform apply', set the poller repo variables from the
+outputs: VMSS_RESOURCE_ID = \$(terraform -chdir=../terraform output -raw vmss_id),
+VMSS_REGION = \$(terraform -chdir=../terraform output -raw vmss_location)  (README section C)."
+fi
+manual_step "Open a PR touching terraform/** to trigger 'plan', then merge to 'main' to 'apply'."
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 step "Done"
@@ -609,15 +644,10 @@ $( [[ "$WITH_POLLER" == "1" ]] && echo "  $APP_POLLER   client id : ${POLLER_APP
     container_name        = $TFSTATE_CONTAINER
     key                   = github-runner-vmss.tfstate
 
-Next:
-$( [[ "$SET_GITHUB" == "1" ]] || echo "  - Set the repo variables/secrets from README step 3 & 7.4 (or re-run with --set-github)." )
-$( [[ -n "$GITHUB_APP_ID" ]] || echo "  - Create the GitHub App (README step 1) and set RUNNER_BOOTSTRAP_APP_ID / _PRIVATE_KEY." )
-$( [[ "$SEED_TOKEN" == "1" ]] || echo "  - Run the 'Refresh GitHub App Token in Key Vault' workflow once (seeds github-app-token)." )
-  - Confirm bootstrap_agent.sh has GITHUB_ORG / KEYVAULT_NAME / RUNNER_VERSION set (README step 6).
-  - Open a PR touching terraform/** to trigger plan, then merge to apply.
-
   State recorded in: $STATE_FILE  (teardown.sh reads this)
 EOF
+
+print_manual_steps
 
 if [[ "${ROLE_FAILURES:-0}" -gt 0 ]]; then
   warn ""
