@@ -1,8 +1,10 @@
 name: Self-Hosted Runner Smoke Test
 
-# Sanity-checks that the self-hosted runners (VMSS or ACI) pick up jobs and
-# have the tooling we expect. Runs on demand, and on a daily schedule so a
-# broken scale set surfaces before someone needs it.
+# Connect / smoke / build check for the self-hosted runners (VMSS or ACI).
+# "Connect" is implicit - the job being picked up at all proves the runner
+# registered and is online. Then we smoke-test the host and do a real build.
+# Runs on demand, and on a daily schedule so a broken scale set surfaces
+# before someone actually needs it.
 
 on:
   workflow_dispatch:
@@ -26,46 +28,93 @@ concurrency:
 
 jobs:
   smoke:
-    # schedule/other events have no inputs, so fall back to the vmss pool
+    # schedule/other events have no inputs, so fall back to the vmss pool.
+    # Both pools register with: self-hosted, linux, x64, <pool>
+    #   vmss -> bootstrap_agent.sh   aci -> docker/entrypoint.sh
     runs-on:
       - self-hosted
       - linux
       - x64
       - ${{ github.event.inputs.runner_label || 'vmss' }}
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      POOL: ${{ github.event.inputs.runner_label || 'vmss' }}
     steps:
       - uses: actions/checkout@v4
 
+      # --- CONNECT ---
       - name: Runner identity
         run: |
+          echo "Pool        : ${POOL}"
           echo "Runner name : ${RUNNER_NAME}"
           echo "Runner OS   : ${RUNNER_OS} / $(uname -m)"
-          echo "Labels      : self-hosted, linux, x64, ${{ github.event.inputs.runner_label || 'vmss' }}"
           echo "Workdir     : ${RUNNER_WORKSPACE}"
           echo "Kernel      : $(uname -a)"
 
+      # --- SMOKE ---
       - name: Host resources
         run: |
-          echo "--- CPU ---"; nproc
-          echo "--- Memory ---"; free -h || cat /proc/meminfo | head -3
-          echo "--- Disk ---"; df -h "${RUNNER_WORKSPACE:-$PWD}" .
+          echo "--- CPU ---";    nproc
+          echo "--- Memory ---";  free -h || head -3 /proc/meminfo
+          echo "--- Disk ---";    df -h "${RUNNER_WORKSPACE:-$PWD}" .
 
       - name: Tooling present
         run: |
-          set -x
-          git --version
-          docker version --format '{{.Server.Version}}' || echo "docker: not available"
-          az version || echo "az: not available"
-          jq --version || echo "jq: not available"
-          curl --version | head -1
+          fail=0
+          check() { if command -v "$1" >/dev/null 2>&1; then printf '  ok   %-8s %s\n' "$1" "$($2 2>&1 | head -1)"; else printf '  MISS %s\n' "$1"; fail=1; fi; }
+          check git     "git --version"
+          check jq      "jq --version"
+          check curl    "curl --version"
+          check node    "node --version"
+          check dotnet  "dotnet --version"
+          check az      "az version"
+          # docker is expected on vmss; on aci the CLI is present but the
+          # daemon needs privileged mode that isn't configured - don't fail.
+          if command -v docker >/dev/null 2>&1; then
+            docker info >/dev/null 2>&1 && echo "  ok   docker   daemon reachable" || echo "  info docker   CLI only (no daemon - expected on aci)"
+          else
+            echo "  info docker   not installed"
+          fi
+          exit $fail
 
       - name: Outbound network
         run: |
-          curl -fsS -o /dev/null -w "github.com  -> %{http_code}\n" https://github.com
-          curl -fsS -o /dev/null -w "ipify       -> %{http_code}\n" https://api.ipify.org
+          curl -fsS -o /dev/null -w "github.com   -> %{http_code}\n" https://github.com
+          curl -fsS -o /dev/null -w "api.github   -> %{http_code}\n" https://api.github.com
+          curl -fsS -o /dev/null -w "ipify        -> %{http_code}\n" https://api.ipify.org
+          curl -fsS -o /dev/null -w "mcr.microsoft-> %{http_code}\n" https://mcr.microsoft.com
 
-      - name: Workload
+      # --- BUILD ---
+      # Portable build that works identically on both pools: both images ship
+      # the .NET 8 SDK (Dockerfile mirrors bootstrap_agent.sh). Scaffold a
+      # tiny console app, restore, build, run.
+      - name: Build (.NET console app)
         run: |
-          echo "Running a trivial compute step to prove job execution..."
-          python3 -c "print(sum(range(1_000_000)))" || awk 'BEGIN{s=0;for(i=0;i<1000000;i++)s+=i;print s}'
-          echo "Self-hosted runner smoke test passed on ${RUNNER_NAME}."
+          set -e
+          work="$(mktemp -d)"
+          cd "$work"
+          dotnet new console -n SmokeApp --no-restore
+          cd SmokeApp
+          dotnet restore
+          dotnet build -c Release --no-restore
+          out="$(dotnet run -c Release --no-build)"
+          echo "App output: ${out}"
+          [ "${out}" = "Hello, World!" ] || { echo "unexpected build output"; exit 1; }
+          rm -rf "$work"
+
+      # Container build - real signal on vmss, skipped cleanly on aci where
+      # there's no usable Docker daemon.
+      - name: Build (container image)
+        run: |
+          if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+            printf 'FROM alpine:3.20\nRUN echo "built on %s" > /built.txt\nCMD ["cat","/built.txt"]\n' "${RUNNER_NAME}" > Dockerfile.smoke
+            docker build -f Dockerfile.smoke -t runner-smoke:${GITHUB_RUN_ID} .
+            docker run --rm runner-smoke:${GITHUB_RUN_ID}
+            docker rmi runner-smoke:${GITHUB_RUN_ID} || true
+            rm -f Dockerfile.smoke
+          else
+            echo "No Docker daemon on this runner (${POOL}) - skipping container build."
+          fi
+
+      - name: Result
+        run: echo "Connect + smoke + build passed on ${RUNNER_NAME} (${POOL} pool)."
