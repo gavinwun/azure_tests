@@ -48,6 +48,13 @@ github_repo         = "gavinwun/azure_tests"
 # procedure before changing this on a live deployment.
 compute_backend = "vmss"
 
+# Azure Monitor Agent on the VMSS instances. On by default; ships syslog +
+# bootstrap output + perf counters to Log Analytics. Empty workspace ID =>
+# Terraform creates a dedicated workspace; set it to an existing
+# workspace's resource ID to reuse one.
+enable_vmss_monitoring     = true
+log_analytics_workspace_id = ""
+
 tags = {
   costCentre = "platform-engineering"
 }

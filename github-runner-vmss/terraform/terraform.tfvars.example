@@ -24,6 +24,16 @@ environment = "dev"
 # procedure before changing this on a live deployment.
 compute_backend = "vmss"
 
+# Azure Monitor Agent on the VMSS instances (vmss backend only). On by
+# default; it ships syslog + bootstrap output + perf counters to Log
+# Analytics. Leave log_analytics_workspace_id empty to have Terraform
+# create a dedicated workspace, or set it to an existing workspace's
+# resource ID to reuse one.
+enable_vmss_monitoring     = true
+log_analytics_workspace_id = ""
+# log_analytics_retention_days        = 30
+# vmss_perf_counter_sampling_seconds  = 60
+
 tags = {
   costCentre = "platform-engineering"
 }

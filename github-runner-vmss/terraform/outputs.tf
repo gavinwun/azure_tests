@@ -33,6 +33,16 @@ output "vmss_location" {
   description = "Feed into poll-queue-depth.yml's VMSS_REGION variable - custom metrics must be posted to this region's Azure Monitor endpoint."
 }
 
+output "log_analytics_workspace_id" {
+  value       = local.effective_log_analytics_workspace_id
+  description = "Workspace AMA ships syslog/perf to - the one Terraform created, or the existing one passed via log_analytics_workspace_id. Null when enable_vmss_monitoring = false."
+}
+
+output "vmss_data_collection_rule_id" {
+  value       = local.vmss_monitoring_enabled ? azurerm_monitor_data_collection_rule.vmss[0].id : null
+  description = "The DCR bound to the scale set. Query bootstrap output in the workspace with: Syslog | where Facility == \"local0\""
+}
+
 #########################
 # ACI backend outputs
 #########################

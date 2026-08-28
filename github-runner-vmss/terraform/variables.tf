@@ -193,6 +193,44 @@ variable "queue_messages_per_instance" {
   default     = 1
 }
 
+#########################################################################
+# Monitoring - Azure Monitor Agent (AMA), vmss backend only
+#########################################################################
+# The runner instances get the modern AzureMonitorLinuxAgent extension
+# (NOT the deprecated OmsAgentForLinux / Log Analytics agent, which is
+# retired as of Aug 2024) plus a Data Collection Rule that ships syslog,
+# the bootstrap script's output, and perf counters to a Log Analytics
+# workspace. ACI has no VM extension surface, so this is vmss-only.
+
+variable "enable_vmss_monitoring" {
+  description = "Install Azure Monitor Agent + a Data Collection Rule on the VMSS instances (vmss backend only). Set false to skip all monitoring resources."
+  type        = bool
+  default     = true
+}
+
+variable "log_analytics_workspace_id" {
+  description = "Resource ID of an EXISTING Log Analytics workspace to send AMA data to. Leave empty (the default) to have Terraform create a dedicated workspace for the runner fleet. Ignored when enable_vmss_monitoring = false."
+  type        = string
+  default     = ""
+}
+
+variable "log_analytics_retention_days" {
+  description = "Retention for the Log Analytics workspace Terraform creates when log_analytics_workspace_id is empty. Minimum 30. Ignored when an existing workspace is supplied."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.log_analytics_retention_days >= 30 && var.log_analytics_retention_days <= 730
+    error_message = "log_analytics_retention_days must be between 30 and 730."
+  }
+}
+
+variable "vmss_perf_counter_sampling_seconds" {
+  description = "How often AMA samples the performance counters on each runner instance, in seconds."
+  type        = number
+  default     = 60
+}
+
 #########################
 # ACI backend
 #########################

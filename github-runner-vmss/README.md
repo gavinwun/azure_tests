@@ -776,6 +776,22 @@ Once the private endpoint and self-hosted runners exist, applies that run
   /var/log/bootstrap/bootstrap.log                # bootstrap_agent.sh output
   /var/log/bootstrap/bootstrap_agent_detail.log    # full tee'd output
   ```
+  With `enable_vmss_monitoring = true` (the default) the same output is also
+  in Log Analytics without needing SSH - `bootstrap_agent.sh` logs to syslog
+  facility `local0`, which the Azure Monitor Agent Data Collection Rule
+  ships to the workspace:
+  ```
+  Syslog | where Facility == "local0" | order by TimeGenerated asc
+  ```
+- **Monitoring** (`monitoring.tf`, vmss backend only): each instance runs
+  the modern `AzureMonitorLinuxAgent` extension (not the retired Log
+  Analytics agent / MMA) and a DCR that ships syslog + perf counters to a
+  Log Analytics workspace. Leave `log_analytics_workspace_id` empty to have
+  Terraform create a dedicated workspace, or point it at an existing one.
+  Set `enable_vmss_monitoring = false` to skip it entirely. Because the
+  VMSS uses `upgrade_mode = "Manual"`, instances already running when you
+  first add this need a model upgrade (`az vmss update-instances`) or a
+  roll before the agent lands.
 - **GitHub side**: Org Settings → Actions → Runners - your VMSS instances
   should appear, named `vmss-runner-<hostname>`, with the labels set in
   `bootstrap_agent.sh` (`self-hosted, linux, x64, vmss`).

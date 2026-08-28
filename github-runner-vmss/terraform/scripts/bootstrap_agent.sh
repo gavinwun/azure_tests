@@ -8,7 +8,32 @@
 #   2. Registers + runs this instance as an EPHEMERAL GitHub Actions runner
 #      (auto-deregisters after one job - VMSS scale-in reclaims the instance)
 set -euo pipefail
-exec > >(tee -a /var/log/bootstrap/bootstrap_agent_detail.log) 2>&1
+# Mirror all output to a local file AND to syslog (facility local0, tag
+# ghrunner-bootstrap). Azure Monitor Agent's Data Collection Rule picks up
+# local0 and ships it to Log Analytics, so a failed bootstrap is visible
+# there without SSHing to the instance. See terraform/monitoring.tf.
+exec > >(tee -a /var/log/bootstrap/bootstrap_agent_detail.log | logger -t ghrunner-bootstrap -p local0.info) 2>&1
+
+# ---------------------------------------------------------------------
+# Run-once guard
+#
+# The CustomScript extension (main.tf) re-executes its commandToExecute
+# on every instance model update - a VM resize, an OS image bump, VMSS
+# auto-repair. This script is a first-boot provisioner and is NOT
+# idempotent: it registers an EPHEMERAL runner, useradds actions-runner,
+# installs systemd units, and adds apt repos. Re-running it on an
+# already-configured instance fails partway and flips the whole
+# extension to "provisioning failed".
+#
+# The sentinel is written as the very last step below, so a first boot
+# that fails midway is still retried on the next extension run.
+# commandToExecute checks for the same file and skips the download too.
+# ---------------------------------------------------------------------
+BOOTSTRAP_SENTINEL="/var/lib/ghrunner/.bootstrapped"
+if [[ -f "${BOOTSTRAP_SENTINEL}" ]]; then
+  echo "Bootstrap already completed ($(cat "${BOOTSTRAP_SENTINEL}" 2>/dev/null || echo 'date unknown')) - nothing to do."
+  exit 0
+fi
 
 echo "Starting bootstrap at $(date -u)"
 
@@ -264,5 +289,10 @@ EOF
 
 systemctl daemon-reload
 systemctl enable --now terminate-watcher
+
+# Mark this instance done so the CustomScript extension doesn't re-run
+# bootstrap on the next model update (resize / image bump / auto-repair).
+mkdir -p "$(dirname "${BOOTSTRAP_SENTINEL}")"
+date -u +%FT%TZ > "${BOOTSTRAP_SENTINEL}"
 
 echo "Bootstrap complete at $(date -u). Runner ${INSTANCE_NAME} registered and running."

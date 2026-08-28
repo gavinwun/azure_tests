@@ -163,11 +163,11 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
   resource_group_name = data.azurerm_resource_group.mgmt_devops.name
   tags                = local.tags
 
-  sku                         = var.vm_size
-  instances                   = var.queue_autoscale_default_instances # autoscale owns the live count after first apply - see lifecycle block below
-  admin_username              = var.admin_username
-  computer_name_prefix        = local.vmss_computer_name_prefix
-  encryption_at_host_enabled  = true
+  sku                        = var.vm_size
+  instances                  = var.queue_autoscale_default_instances # autoscale owns the live count after first apply - see lifecycle block below
+  admin_username             = var.admin_username
+  computer_name_prefix       = local.vmss_computer_name_prefix
+  encryption_at_host_enabled = true
 
   # -----------------------------------------------------------------
   # SSH key auth instead of a local admin password.
@@ -289,6 +289,13 @@ resource "azurerm_virtual_machine_scale_set_extension" "bootstrap_devops_agent" 
       "bash -c \"",
       "set -euo pipefail;",
       "mkdir -p /var/log/bootstrap;",
+      # Run-once guard. CustomScript re-executes commandToExecute on every
+      # instance model update - a VM resize, an image bump, auto-repair.
+      # bootstrap_agent.sh is a first-boot provisioner and isn't safe to
+      # re-run, so bail out here if it already finished. The sentinel is
+      # written by bootstrap_agent.sh as its final step, so a failed first
+      # boot still retries.
+      "if [ -f /var/lib/ghrunner/.bootstrapped ]; then echo 'DevOpsBootstrap: instance already bootstrapped - skipping re-run'; exit 0; fi;",
       "LOG=/var/log/bootstrap/bootstrap-download.log;",
 
       "SCRIPT_URL='https://${azurerm_storage_account.bootstrap[0].name}.blob.core.windows.net/${azurerm_storage_container.scripts[0].name}/${azurerm_storage_blob.bootstrap_script[0].name}';",
