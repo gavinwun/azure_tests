@@ -13,9 +13,8 @@ variable (`compute_backend = "vmss"` or `"aci"`):
 
 Only one backend is ever deployed at a time - the inactive one's
 resources simply don't exist (`count = 0` in Terraform). Both are
-documented in full below; read the "Setup order matters" section for
-whichever backend you're using, then the corresponding "Optional"
-section only if relevant.
+documented in full below; read the "Setup" section for whichever backend
+you're using, then the corresponding "Optional" section only if relevant.
 
 ## Repo layout
 
@@ -35,6 +34,10 @@ terraform/
   terraform.tfvars.example     Copy to terraform.tfvars and fill in
   scripts/
     bootstrap_agent.sh          VMSS only: runs on every instance boot
+setup/
+  bootstrap.sh                 One-shot: every manual pre-Terraform step (see "Setup")
+  teardown.sh                  Reverses bootstrap.sh - app registrations, KV secrets, opt-in the rest
+  lib.sh / README.md           Shared helpers / usage
 docker/
   Dockerfile                   ACI only: runner image, built by build-and-push-runner-image.yml
   entrypoint.sh                ACI only: container's registration + run logic
@@ -58,11 +61,50 @@ plan/apply fails at the data-source lookup stage.
 
 ---
 
-## Setup order matters
+## Setup
 
-Do these in order. Specifically: **the Key Vault secret must exist before
-any VMSS instance boots**, or the bootstrap script has nothing to
-authenticate with on first boot.
+For a personal subscription or a fresh client subscription, run
+**`setup/bootstrap.sh`** — it does step 0 and steps 2, 3, 4, 5, and 7
+below in one idempotent command: the management resource group, the RBAC
+Key Vault + your Secrets Officer grant, the tfstate storage account +
+container, the VMSS SSH key pair in Key Vault, the `rg-network-hub`
+resource group when `manage_network = true`, both OIDC identities with
+every federated credential and role assignment, the repo
+variables/secrets, and the `production` environment.
+
+Do these by hand first — they can't be scripted:
+
+1. **Create the GitHub App** and download its private key — [step 1](#1-create-the-github-app).
+2. **Edit `terraform/scripts/bootstrap_agent.sh`** — [step 6](#6-configure-and-edit-bootstrap_agentsh).
+3. **`az login`** as a user with **Owner** or **User Access Administrator**
+   on the target subscription.
+
+Then:
+
+```bash
+cd setup
+./bootstrap.sh \
+  --subscription-id <SUB_ID> \
+  --github-app-id <APP_ID> \
+  --github-app-private-key-file <path-to-app-private-key.pem> \
+  --set-github --seed-token --with-poller
+```
+
+Full flag list, the `--env-require-self-review` option, and the matching
+`teardown.sh`: [`setup/README.md`](setup/README.md). Re-running is safe -
+anything that already exists is detected and skipped. When it finishes,
+skip to [step 8 (Push and merge)](#8-push-and-merge).
+
+---
+
+### Manual setup (what `bootstrap.sh` automates)
+
+The rest of this section is the step-by-step equivalent. Follow it if you
+want to see exactly what gets created, you're wiring this into an existing
+landing zone where some of these resources already exist, or you're on a
+subscription where you can't hold the roles the script needs all at once.
+**The Key Vault secret must exist before any VMSS instance boots**, so
+order still matters within this path.
 
 ### 0. Create the Key Vault (skip if you already have one)
 
