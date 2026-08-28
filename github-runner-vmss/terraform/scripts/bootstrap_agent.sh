@@ -116,16 +116,22 @@ systemctl enable --now docker
 
 # ---------------------------------------------------------------------
 # 6. GitHub Actions runner - download, register, run (ephemeral)
+#
+# Every step here is guarded so the script is safe to re-run even without
+# the run-once sentinel (e.g. on an instance that bootstrapped under an
+# older version of this script). See the run-once guard near the top.
 # ---------------------------------------------------------------------
 mkdir -p /opt/actions-runner
 cd /opt/actions-runner
 
-curl -o actions-runner-linux-x64.tar.gz -L \
-  "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
-tar xzf actions-runner-linux-x64.tar.gz
-rm actions-runner-linux-x64.tar.gz
-
-./bin/installdependencies.sh
+# Download + extract only if the runner isn't already unpacked here.
+if [[ ! -x /opt/actions-runner/config.sh ]]; then
+  curl -o actions-runner-linux-x64.tar.gz -L \
+    "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
+  tar xzf actions-runner-linux-x64.tar.gz
+  rm actions-runner-linux-x64.tar.gz
+  ./bin/installdependencies.sh
+fi
 
 id -u actions-runner &>/dev/null || useradd -m -s /bin/bash actions-runner
 chown -R actions-runner:actions-runner /opt/actions-runner
@@ -154,18 +160,34 @@ fi
 
 INSTANCE_NAME="vmss-runner-$(hostname)"
 
-sudo -u actions-runner ./config.sh \
-  --url "${GH_RUNNER_URL}" \
-  --token "${REG_TOKEN}" \
-  --name "${INSTANCE_NAME}" \
-  --labels "${RUNNER_LABELS}" \
-  --runnergroup "${RUNNER_GROUP}" \
-  --ephemeral \
-  --unattended
+# Skip re-registration if this instance already has a configured runner
+# (idle, waiting for a job). Ephemeral runners delete .runner themselves
+# after their one job, so a missing .runner here just means "register
+# fresh". --replace overwrites any stale server-side registration that
+# still holds this name (e.g. a prior instance with the same hostname).
+if [[ -f /opt/actions-runner/.runner ]]; then
+  echo "Runner already configured - leaving existing registration in place."
+else
+  sudo -u actions-runner ./config.sh \
+    --url "${GH_RUNNER_URL}" \
+    --token "${REG_TOKEN}" \
+    --name "${INSTANCE_NAME}" \
+    --labels "${RUNNER_LABELS}" \
+    --runnergroup "${RUNNER_GROUP}" \
+    --ephemeral \
+    --unattended \
+    --replace
+fi
 
 # Install as a systemd service so it survives the bootstrap script exiting,
 # rather than running in the foreground and blocking the extension.
-./svc.sh install actions-runner
+# svc.sh install fails if the unit already exists, so guard it; svc.sh
+# start is safe to call repeatedly.
+if ls /etc/systemd/system/actions.runner.*.service >/dev/null 2>&1; then
+  echo "Runner service already installed."
+else
+  ./svc.sh install actions-runner
+fi
 ./svc.sh start
 
 # ---------------------------------------------------------------------

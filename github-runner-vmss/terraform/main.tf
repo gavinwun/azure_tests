@@ -274,6 +274,14 @@ resource "azurerm_virtual_machine_scale_set_extension" "bootstrap_devops_agent" 
   type_handler_version         = "2.1"
   auto_upgrade_minor_version   = true
 
+  # Belt-and-braces: the run-once guard + the idempotent steps in
+  # bootstrap_agent.sh already make a re-run a no-op, but this stops a
+  # bootstrap hiccup during a model update (resize / image bump /
+  # auto-repair) from flipping the instance to "provisioning failed" and
+  # blocking the operation. First-boot failures still surface via the
+  # instance never coming healthy in GitHub; check /var/log/bootstrap/.
+  failure_suppression_enabled = true
+
   settings = jsonencode({
     fileUris = []
   })
