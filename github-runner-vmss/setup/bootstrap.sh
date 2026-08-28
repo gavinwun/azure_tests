@@ -56,7 +56,8 @@ GITHUB_APP_KEY_FILE=""
 SUBJECT_FORMAT="auto"            # auto|plain|immutable
 RUNNER_SCOPE="auto"             # auto|org|repo - where runners register
 TFSTATE_RG=""                    # default: management RG
-TFSTATE_ACCOUNT=""               # default: from state.env, else generated
+TFSTATE_ACCOUNT=""               # default: from state.env, else auto-picked
+TFSTATE_ACCOUNT_EXPLICIT=0
 TFSTATE_CONTAINER="tfstate"
 WITH_POLLER=0
 SET_GITHUB=0
@@ -87,7 +88,8 @@ Common options:
   --runner-scope auto|org|repo   Where runners register (default: auto - detects user vs org).
                                  "repo" for a personal account; sets the GITHUB_RUNNER_SCOPE repo var.
   --tfstate-rg <name>            Resource group for the tfstate account (default: management RG).
-  --tfstate-account <name>       tfstate storage account (default: reuse state.env or generate one).
+  --tfstate-account <name>       tfstate storage account. Default: reuse state.env, else a name
+                                from the subscription id, else an available random one.
   --tfstate-container <name>     tfstate blob container (default: $TFSTATE_CONTAINER).
   --with-poller                  Also create the queue-poller identity (README optional section B).
   --set-github                   Also set repo variables/secrets and create the 'production' env (needs gh).
@@ -115,7 +117,7 @@ while [[ $# -gt 0 ]]; do
     --subject-format) SUBJECT_FORMAT="$2"; shift 2 ;;
     --runner-scope) RUNNER_SCOPE="$2"; shift 2 ;;
     --tfstate-rg) TFSTATE_RG="$2"; shift 2 ;;
-    --tfstate-account) TFSTATE_ACCOUNT="$2"; shift 2 ;;
+    --tfstate-account) TFSTATE_ACCOUNT="$2"; TFSTATE_ACCOUNT_EXPLICIT=1; shift 2 ;;
     --tfstate-container) TFSTATE_CONTAINER="$2"; shift 2 ;;
     --with-poller) WITH_POLLER=1; shift ;;
     --set-github) SET_GITHUB=1; shift ;;
@@ -130,17 +132,28 @@ done
 
 need az
 [[ -n "$SUBSCRIPTION_ID" ]] || die "--subscription-id is required."
+[[ "$SUBSCRIPTION_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] \
+  || die "--subscription-id doesn't look like a GUID: '$SUBSCRIPTION_ID' (missing a space between args?)"
 [[ "$SUBJECT_FORMAT" =~ ^(auto|plain|immutable)$ ]] || die "--subject-format must be auto|plain|immutable."
 [[ "$RUNNER_SCOPE" =~ ^(auto|org|repo)$ ]] || die "--runner-scope must be auto|org|repo."
 
 # ---------------------------------------------------------------------------
-# Resolve configuration
+# Resolve configuration  (several sequential az/gh network calls - ~30-60s,
+# quiet between the lines below; it is not stuck)
 # ---------------------------------------------------------------------------
 step "Resolving configuration"
 
-az account show >/dev/null 2>&1 || die "'az' is not logged in. Run: az login"
-run az account set --subscription "$SUBSCRIPTION_ID"
+info "checking az login / subscription..."
+# Do this WITHOUT suppressing stderr: if the token is expired, az may try
+# an interactive re-auth prompt. Later calls redirect stderr to /dev/null,
+# so that prompt would be invisible and the script would just hang waiting
+# on stdin. Surface it here instead.
+az account set --subscription "$SUBSCRIPTION_ID" -o none \
+  || die "'az' can't select subscription $SUBSCRIPTION_ID - run 'az login' (and 'az account set --subscription $SUBSCRIPTION_ID') then retry."
+az account get-access-token -o none 2>/dev/null \
+  || die "Your az token is expired/invalid - run 'az login' then retry."
 TENANT_ID=$(az account show --query tenantId -o tsv)
+info "resolving your user object id (Graph call, can take a few seconds)..."
 CURRENT_USER_OID=$(az ad signed-in-user show --query id -o tsv 2>/dev/null || true)
 [[ -n "$CURRENT_USER_OID" ]] || warn "Could not resolve signed-in user object id (service principal login?). Your personal Key Vault / Storage grants will be skipped."
 
@@ -181,15 +194,44 @@ if [[ "$RUNNER_SCOPE" == "auto" ]]; then
 fi
 
 TFSTATE_RG="${TFSTATE_RG:-$MGMT_RG}"
-[[ -z "$TFSTATE_ACCOUNT" ]] && TFSTATE_ACCOUNT="$(state_get TFSTATE_ACCOUNT || true)"
-if [[ -z "$TFSTATE_ACCOUNT" ]]; then
-  # Derive a STABLE name from the subscription id (not RANDOM) so re-runs
-  # reuse the same account even if state.env was lost - "st" + 20 hex,
-  # within the 3-24 lowercase-alphanumeric limit.
-  h=$(printf '%s' "$SUBSCRIPTION_ID" | { sha256sum 2>/dev/null || shasum -a 256; } | tr -dc 'a-f0-9' | head -c 20)
-  TFSTATE_ACCOUNT="st${h}"
-  info "No --tfstate-account / none in state.env - using a name derived from the subscription id: $TFSTATE_ACCOUNT"
-  info "(pass --tfstate-account <name> if you already have a state account with a different name)"
+
+# Stable name derived from the subscription id (first 20 hex of its sha256).
+# Plain var assignment - a SIGPIPE from the `head`-less form is fine here,
+# but keep it pipe-free anyway.
+_sub_hash="$(printf '%s' "$SUBSCRIPTION_ID" | { sha256sum 2>/dev/null || shasum -a 256; })"
+TFSTATE_NAME_STABLE="st${_sub_hash:0:20}"
+
+# Resolve the tfstate storage account name. Precedence:
+#   1. --tfstate-account (used verbatim, never second-guessed)
+#   2. a name already recorded in state.env, IF it exists in this RG or the
+#      name is still globally free
+#   3. the stable subscription-derived name
+#   4. random names, until one is globally available
+# Storage account names are globally unique, so a stale/taken candidate is
+# skipped automatically rather than failing the run.
+if [[ "$TFSTATE_ACCOUNT_EXPLICIT" != "1" && "$DRY_RUN" != "1" ]]; then
+  info "picking an available tfstate storage account name (a few name-availability checks)..."
+  _cands=("$(state_get TFSTATE_ACCOUNT || true)" "$TFSTATE_NAME_STABLE")
+  for _i in 1 2 3 4 5; do
+    # $RANDOM only (0-32767) - no pipes, so no SIGPIPE-under-set-e surprise.
+    _r="${RANDOM}${RANDOM}${RANDOM}"
+    _cands+=("sttf${_r:0:16}")
+  done
+  TFSTATE_ACCOUNT=""
+  for _c in "${_cands[@]}"; do
+    [[ -z "$_c" ]] && continue
+    if az storage account show --name "$_c" --resource-group "$TFSTATE_RG" >/dev/null 2>&1; then
+      TFSTATE_ACCOUNT="$_c"; info "reusing existing state account: $_c"; break
+    fi
+    if [[ "$(az storage account check-name --name "$_c" --query nameAvailable -o tsv 2>/dev/null)" == "true" ]]; then
+      TFSTATE_ACCOUNT="$_c"; info "state account name to create: $_c"; break
+    fi
+    info "state account name '$_c' is unavailable - trying another"
+  done
+  [[ -n "$TFSTATE_ACCOUNT" ]] || die "could not find an available storage account name - pass --tfstate-account <name>."
+elif [[ -z "$TFSTATE_ACCOUNT" ]]; then
+  TFSTATE_ACCOUNT="$(state_get TFSTATE_ACCOUNT || true)"
+  [[ -n "$TFSTATE_ACCOUNT" ]] || TFSTATE_ACCOUNT="$TFSTATE_NAME_STABLE"
 fi
 
 # Owner / repo numeric IDs (only needed for immutable subjects)
@@ -293,10 +335,8 @@ elif az storage account create --name "$TFSTATE_ACCOUNT" --resource-group "$TFST
   state_set CREATED_TFSTATE_ACCOUNT "$TFSTATE_ACCOUNT"
 else
   ROLE_FAILURES=$((ROLE_FAILURES + 1))
-  warn "could not create state storage account '$TFSTATE_ACCOUNT'"
-  warn "  - if the name is globally taken, or you already have one under a different name, list it:"
-  warn "      az storage account list -g $TFSTATE_RG --query \"[].name\" -o tsv"
-  warn "  - then re-run with:  --tfstate-account <existing-name>"
+  warn "could not create state storage account '$TFSTATE_ACCOUNT' (name taken between check and create?)."
+  warn "Just re-run bootstrap.sh - it will pick a fresh available name."
 fi
 TFSTATE_ID=$(az storage account show --name "$TFSTATE_ACCOUNT" --resource-group "$TFSTATE_RG" --query id -o tsv 2>/dev/null || echo "")
 if [[ -n "$CURRENT_USER_OID" && -n "$TFSTATE_ID" ]]; then
@@ -330,17 +370,23 @@ else
   need ssh-keygen
   tmpkey="$(mktemp -d)/ghrunner-vmss-key"
   run ssh-keygen -t ed25519 -f "$tmpkey" -N "" -q
+  # Pass the key material as --value, NOT --file: under WSL the `az` on
+  # PATH is often the Windows az.exe, which can't open a Linux /tmp path
+  # ("[Errno 2] No such file or directory"). --value works either way.
+  pub_val="$(cat "$tmpkey.pub")"
+  priv_val="$(cat "$tmpkey")"
   # Data-plane RBAC (your Secrets Officer grant just above) can take a
   # minute or two to be usable - retry rather than fail the whole run.
   if [[ "$DRY_RUN" == "1" ]] || \
-     ( retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-public-key  --file "$tmpkey.pub" -o none && \
-       retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-private-key --file "$tmpkey"     -o none ); then
+     ( retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-public-key  --value "$pub_val"  -o none && \
+       retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-private-key --value "$priv_val" -o none ); then
     ok "stored vmss-ssh-public-key / vmss-ssh-private-key"
     state_set CREATED_SSH_SECRETS "1"
   else
     ROLE_FAILURES=$((ROLE_FAILURES + 1))
     warn "could not write the SSH secrets (Key Vault data-plane access not ready?). Re-run bootstrap.sh shortly."
   fi
+  unset pub_val priv_val
   if [[ "$DRY_RUN" != "1" ]]; then
     command -v shred >/dev/null 2>&1 && shred -u "$tmpkey" "$tmpkey.pub" 2>/dev/null || rm -f "$tmpkey" "$tmpkey.pub"
     rmdir "$(dirname "$tmpkey")" 2>/dev/null || true

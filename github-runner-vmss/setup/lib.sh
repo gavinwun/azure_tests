@@ -16,8 +16,11 @@ set -euo pipefail
 # replies "Operation returned an invalid status 'Bad Request'". Routing
 # every call through this function removes the \r once, everywhere.
 # `command az` avoids recursing into this function; pipefail keeps az's
-# exit status rather than tr's.
-az() { command az "$@" | tr -d '\r'; }
+# exit status rather than tr's. stdin is /dev/null so that an expired-token
+# re-auth prompt (which several call sites send to /dev/null via 2>&1) fails
+# fast instead of hanging forever waiting on input. No az call in these
+# scripts reads stdin.
+az() { command az "$@" </dev/null | tr -d '\r'; }
 
 # ---------------------------------------------------------------------------
 # Output
