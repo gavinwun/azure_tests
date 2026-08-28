@@ -123,9 +123,44 @@ jobs:
             -backend-config="container_name=${{ vars.TFSTATE_CONTAINER }}" \
             -backend-config="key=github-runner-vmss.tfstate"
 
-      - name: Terraform Apply
+      # bootstrap_agent.sh is uploaded to the bootstrap storage account over
+      # its public endpoint (this runner is not in the hub VNet). Open the
+      # firewall to just this runner's egress IP for the upload apply, then
+      # a second apply puts public_network_access_enabled / ip_rules back at
+      # their defaults (off / empty) so the account is private-only at rest.
+      - name: Detect runner egress IP
+        id: runnerip
+        run: echo "ip=$(curl -fsS https://api.ipify.org)" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Apply (storage public endpoint open for script upload)
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: |
+          terraform apply -auto-approve -input=false -var-file="terraform.tfvars" \
+            -var="bootstrap_storage_public_network_access_enabled=true" \
+            -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'
+
+      - name: Terraform Apply (re-lock storage public endpoint)
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: terraform apply -auto-approve -input=false -var-file="terraform.tfvars"
+
+      # Belt-and-braces: if the open apply above failed partway, the account
+      # can be left reachable on its public endpoint (deny-all bar one stale
+      # IP). Force it shut directly - the next run's open apply reconciles
+      # state. No-op when there's nothing deployed yet.
+      - name: Ensure storage public endpoint is locked (safety net)
+        if: always()
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        continue-on-error: true
+        run: |
+          ACCT=$(terraform output -raw bootstrap_storage_account_name 2>/dev/null) || ACCT=""
+          RG=$(terraform output -raw bootstrap_storage_resource_group_name 2>/dev/null) || RG=""
+          if [ -z "$ACCT" ] || [ "$ACCT" = "null" ] || [ -z "$RG" ]; then
+            echo "No bootstrap storage account deployed - nothing to lock."
+            exit 0
+          fi
+          az storage account update --name "$ACCT" --resource-group "$RG" \
+            --public-network-access Disabled --default-action Deny >/dev/null
+          echo "Locked public endpoint on $ACCT"
 
       - name: Show outputs
         working-directory: ${{ env.TF_WORKING_DIR }}

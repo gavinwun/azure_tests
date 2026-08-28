@@ -32,14 +32,24 @@ resource "azurerm_user_assigned_identity" "agent_id" {
 resource "azurerm_storage_account" "bootstrap" {
   count = var.compute_backend == "vmss" ? 1 : 0
 
-  name                             = local.bootstrap_storage_account_name
-  resource_group_name              = data.azurerm_resource_group.mgmt_devops.name
-  location                         = data.azurerm_resource_group.mgmt_devops.location
-  account_tier                     = "Standard"
-  account_replication_type         = "LRS"
-  public_network_access_enabled    = false
-  allow_nested_items_to_be_public  = false
-  shared_access_key_enabled        = false
+  name                            = local.bootstrap_storage_account_name
+  resource_group_name             = data.azurerm_resource_group.mgmt_devops.name
+  location                        = data.azurerm_resource_group.mgmt_devops.location
+  account_tier                    = "Standard"
+  account_replication_type        = "LRS"
+  public_network_access_enabled   = var.bootstrap_storage_public_network_access_enabled
+  allow_nested_items_to_be_public = false
+  shared_access_key_enabled       = false
+
+  # Default-deny even while the public endpoint is open - only the IPs in
+  # bootstrap_storage_allowed_ips (the pipeline runner during a bootstrap
+  # apply) get through. Private endpoint traffic bypasses this entirely,
+  # so the runners are unaffected in either state.
+  network_rules {
+    default_action = "Deny"
+    bypass         = ["AzureServices"]
+    ip_rules       = var.bootstrap_storage_allowed_ips
+  }
 }
 
 resource "azurerm_storage_container" "scripts" {
@@ -59,6 +69,12 @@ resource "azurerm_storage_blob" "bootstrap_script" {
   storage_container_name = azurerm_storage_container.scripts[0].name
   type                   = "Block"
   source                 = "${path.module}/scripts/bootstrap_agent.sh"
+
+  # This is a data-plane write authenticated with the pipeline identity's
+  # AAD token (shared_access_key_enabled = false), so the role assignment
+  # granting it must exist first. Terraform sees no implicit link between
+  # them otherwise - nothing here references the assignment.
+  depends_on = [azurerm_role_assignment.pipeline_blob_contributor]
 }
 
 resource "azurerm_role_assignment" "vmss_blob_reader" {

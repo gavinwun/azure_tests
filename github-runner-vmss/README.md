@@ -639,6 +639,35 @@ terraform plan -var-file="terraform.tfvars"
 terraform apply -var-file="terraform.tfvars"
 ```
 
+**Bootstrap storage public-access window.** `bootstrap_agent.sh` is
+uploaded to a storage account whose public endpoint is shut by default
+(`main.tf`, `azurerm_storage_blob.bootstrap_script`). The identity
+running `terraform apply` can only reach it over that public endpoint
+unless it's already inside the hub VNet - so the first deploy, and any
+later apply from a GitHub-hosted runner, has to open the firewall to
+itself for the upload. Two variables control this:
+
+| Variable | Default | Set during a bootstrap apply |
+| --- | --- | --- |
+| `bootstrap_storage_public_network_access_enabled` | `false` | `true` |
+| `bootstrap_storage_allowed_ips` | `[]` | `["<your egress IP>"]` |
+
+The account stays default-deny in both states; opening it just adds your
+IP to the allowlist. The `apply` job in `terraform-deploy.yml` already
+does this automatically - it detects the runner's egress IP, applies once
+with the endpoint open, then applies again with the defaults to re-lock,
+plus an `az storage account update` safety-net step in case the first
+apply fails partway. Running locally, do the same by hand:
+```bash
+MYIP=$(curl -fsS https://api.ipify.org)
+terraform apply -var-file="terraform.tfvars" \
+  -var="bootstrap_storage_public_network_access_enabled=true" \
+  -var="bootstrap_storage_allowed_ips=[\"$MYIP\"]"
+terraform apply -var-file="terraform.tfvars"   # re-lock
+```
+Once the private endpoint and self-hosted runners exist, applies that run
+*on* those runners reach the account privately and need neither `-var`.
+
 ### 9. Verify
 
 - **Azure side**: `az vmss list-instances -g <rg> -n <vmss-name> -o table` -

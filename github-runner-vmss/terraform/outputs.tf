@@ -23,6 +23,11 @@ output "bootstrap_storage_account_name" {
   value = var.compute_backend == "vmss" ? azurerm_storage_account.bootstrap[0].name : null
 }
 
+output "bootstrap_storage_resource_group_name" {
+  value       = var.compute_backend == "vmss" ? azurerm_storage_account.bootstrap[0].resource_group_name : null
+  description = "Used by terraform-deploy.yml's safety-net step to re-lock the storage public endpoint if an apply fails partway."
+}
+
 output "vmss_location" {
   value       = data.azurerm_resource_group.mgmt_devops.location
   description = "Feed into poll-queue-depth.yml's VMSS_REGION variable - custom metrics must be posted to this region's Azure Monitor endpoint."

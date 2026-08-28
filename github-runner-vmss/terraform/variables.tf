@@ -69,6 +69,34 @@ variable "blob_private_dns_zone_resource_group_name" {
   type        = string
 }
 
+#########################################################################
+# Bootstrap script storage - public network access window
+#########################################################################
+# bootstrap_agent.sh is uploaded by whatever identity runs `terraform
+# apply`. On the first deploy - and any later apply that runs from
+# outside the hub VNet, e.g. a GitHub-hosted runner - that identity has
+# to reach the storage account over its PUBLIC endpoint, since the
+# private endpoint is only reachable from inside the VNet. Once the
+# self-hosted runners exist and applies run from in-network, the public
+# endpoint can stay shut and the runners keep pulling the script via the
+# private endpoint regardless.
+#
+# terraform-deploy.yml's apply job drives these: one apply with public
+# access on and the runner's egress IP allowed, then a second apply with
+# both back at their defaults to re-lock the account.
+
+variable "bootstrap_storage_public_network_access_enabled" {
+  description = "Whether the bootstrap script storage account accepts traffic on its public endpoint. Set true only for the apply that uploads bootstrap_agent.sh from outside the hub VNet; leave false otherwise. Private endpoint access is unaffected either way."
+  type        = bool
+  default     = false
+}
+
+variable "bootstrap_storage_allowed_ips" {
+  description = "Source IPs/CIDRs allowed through the storage firewall while bootstrap_storage_public_network_access_enabled = true (e.g. the pipeline runner's egress IP). The account denies by default, so this must be non-empty for a public-endpoint upload to succeed. Ignored when public access is false."
+  type        = list(string)
+  default     = []
+}
+
 variable "key_vault_name" {
   description = "Existing Key Vault holding the VMSS SSH public key secret and the github-app-token secret."
   type        = string
