@@ -7,6 +7,19 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
+# az wrapper: strip carriage returns.
+# ---------------------------------------------------------------------------
+# Under WSL / Git-Bash the `az` on PATH is often the Windows `az.cmd`, whose
+# output is CRLF-terminated. `$(az ... -o tsv)` then keeps a trailing \r,
+# which silently breaks string comparisons ("true\r" != "true") and, worse,
+# turns captured GUIDs / resource IDs into malformed arguments -> Azure
+# replies "Operation returned an invalid status 'Bad Request'". Routing
+# every call through this function removes the \r once, everywhere.
+# `command az` avoids recursing into this function; pipefail keeps az's
+# exit status rather than tr's.
+az() { command az "$@" | tr -d '\r'; }
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 if [[ -t 1 ]]; then
@@ -101,15 +114,38 @@ az_role_has() {
   [[ "${n:-0}" != "0" ]]
 }
 
+# retry <max> <sleep-seconds> -- <command...>
+retry() {
+  local max="$1" nap="$2"; shift 2; [[ "${1:-}" == "--" ]] && shift
+  local n=1
+  until "$@"; do
+    (( n >= max )) && return 1
+    warn "  attempt $n/$max failed - retrying in ${nap}s (new subscriptions can lag on RBAC)"
+    sleep "$nap"; n=$((n + 1))
+  done
+}
+
+# Count of grants that never succeeded - checked in the run summary.
+ROLE_FAILURES=0
+
 ensure_role() {
-  # ensure_role <assignee-object-id> <role> <scope> [label]
-  local assignee="$1" role="$2" scope="$3" label="${4:-$role}"
+  # ensure_role <assignee-object-id> <role> <scope> [label] [principal-type]
+  local assignee="$1" role="$2" scope="$3" label="${4:-$role}" ptype="${5:-ServicePrincipal}"
   if az_role_has "$assignee" "$role" "$scope"; then
-    skip "role already assigned: $label"
-  else
-    run az role assignment create --assignee-object-id "$assignee" \
-      --assignee-principal-type ServicePrincipal --role "$role" --scope "$scope" -o none
+    skip "role already assigned: $label"; return 0
+  fi
+  if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    printf '    %s[dry-run]%s role assignment create: %s (%s)\n' "$_c_dim" "$_c_reset" "$label" "$ptype"
+    return 0
+  fi
+  if retry 5 20 -- az role assignment create --assignee-object-id "$assignee" \
+        --assignee-principal-type "$ptype" --role "$role" --scope "$scope" -o none; then
     ok "granted $label"
+  else
+    ROLE_FAILURES=$((ROLE_FAILURES + 1))
+    warn "could NOT grant: $label"
+    warn "  fix by hand, then re-run bootstrap.sh (it will skip everything else):"
+    warn "  az role assignment create --assignee-object-id $assignee --assignee-principal-type $ptype --role \"$role\" --scope $scope"
   fi
 }
 

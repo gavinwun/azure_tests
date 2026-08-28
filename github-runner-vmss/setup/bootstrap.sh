@@ -210,16 +210,13 @@ else
     --enable-rbac-authorization true -o none
   ok "created vault (RBAC authorization)"
   state_set CREATED_KEYVAULT "$KV_NAME"
+  # A brand-new vault (especially in a brand-new subscription) can take a
+  # short while before ARM will accept role assignments scoped to it.
+  [[ "$DRY_RUN" == "1" ]] || sleep 10
 fi
 KV_ID=$(az keyvault show --name "$KV_NAME" --query id -o tsv 2>/dev/null || echo "")
-if [[ -n "$CURRENT_USER_OID" && -n "$KV_ID" && "$DRY_RUN" != "1" ]]; then
-  if az_role_has "$CURRENT_USER_OID" "Key Vault Secrets Officer" "$KV_ID"; then
-    skip "you already have Key Vault Secrets Officer"
-  else
-    run az role assignment create --assignee-object-id "$CURRENT_USER_OID" \
-      --assignee-principal-type User --role "Key Vault Secrets Officer" --scope "$KV_ID" -o none
-    ok "granted yourself Key Vault Secrets Officer"
-  fi
+if [[ -n "$CURRENT_USER_OID" && -n "$KV_ID" ]]; then
+  ensure_role "$CURRENT_USER_OID" "Key Vault Secrets Officer" "$KV_ID" "Key Vault Secrets Officer -> you" User
 fi
 
 # ---------------------------------------------------------------------------
@@ -238,24 +235,25 @@ else
   state_set CREATED_TFSTATE_ACCOUNT "$TFSTATE_ACCOUNT"
 fi
 TFSTATE_ID=$(az storage account show --name "$TFSTATE_ACCOUNT" --resource-group "$TFSTATE_RG" --query id -o tsv 2>/dev/null || echo "")
-if [[ -n "$CURRENT_USER_OID" && -n "$TFSTATE_ID" && "$DRY_RUN" != "1" ]]; then
+if [[ -n "$CURRENT_USER_OID" && -n "$TFSTATE_ID" ]]; then
   if az_role_has "$CURRENT_USER_OID" "Storage Blob Data Contributor" "$TFSTATE_ID"; then
     skip "you already have Storage Blob Data Contributor on the state account"
   else
-    run az role assignment create --assignee-object-id "$CURRENT_USER_OID" \
-      --assignee-principal-type User --role "Storage Blob Data Contributor" --scope "$TFSTATE_ID" -o none
-    ok "granted yourself Storage Blob Data Contributor"
+    ensure_role "$CURRENT_USER_OID" "Storage Blob Data Contributor" "$TFSTATE_ID" "Storage Blob Data Contributor -> you" User
     info "waiting ~30s for the data-plane grant to propagate before creating the container..."
-    sleep 30
+    [[ "$DRY_RUN" == "1" ]] || sleep 30
   fi
 fi
 if [[ "$DRY_RUN" == "1" ]]; then
   run az storage container create --name "$TFSTATE_CONTAINER" --account-name "$TFSTATE_ACCOUNT" --auth-mode login
 elif az storage container show --name "$TFSTATE_CONTAINER" --account-name "$TFSTATE_ACCOUNT" --auth-mode login >/dev/null 2>&1; then
   skip "container '$TFSTATE_CONTAINER' exists"
-else
-  run az storage container create --name "$TFSTATE_CONTAINER" --account-name "$TFSTATE_ACCOUNT" --auth-mode login -o none
+elif retry 4 20 -- az storage container create --name "$TFSTATE_CONTAINER" \
+       --account-name "$TFSTATE_ACCOUNT" --auth-mode login -o none; then
   ok "created container '$TFSTATE_CONTAINER'"
+else
+  ROLE_FAILURES=$((ROLE_FAILURES + 1))
+  warn "could not create container '$TFSTATE_CONTAINER' (data-plane grant still propagating?). Re-run bootstrap.sh in a minute."
 fi
 
 # ---------------------------------------------------------------------------
@@ -268,14 +266,21 @@ else
   need ssh-keygen
   tmpkey="$(mktemp -d)/ghrunner-vmss-key"
   run ssh-keygen -t ed25519 -f "$tmpkey" -N "" -q
-  run az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-public-key  --file "$tmpkey.pub" -o none
-  run az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-private-key --file "$tmpkey"     -o none
+  # Data-plane RBAC (your Secrets Officer grant just above) can take a
+  # minute or two to be usable - retry rather than fail the whole run.
+  if [[ "$DRY_RUN" == "1" ]] || \
+     ( retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-public-key  --file "$tmpkey.pub" -o none && \
+       retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" --name vmss-ssh-private-key --file "$tmpkey"     -o none ); then
+    ok "stored vmss-ssh-public-key / vmss-ssh-private-key"
+    state_set CREATED_SSH_SECRETS "1"
+  else
+    ROLE_FAILURES=$((ROLE_FAILURES + 1))
+    warn "could not write the SSH secrets (Key Vault data-plane access not ready?). Re-run bootstrap.sh shortly."
+  fi
   if [[ "$DRY_RUN" != "1" ]]; then
     command -v shred >/dev/null 2>&1 && shred -u "$tmpkey" "$tmpkey.pub" 2>/dev/null || rm -f "$tmpkey" "$tmpkey.pub"
     rmdir "$(dirname "$tmpkey")" 2>/dev/null || true
   fi
-  ok "stored vmss-ssh-public-key / vmss-ssh-private-key (local copy shredded)"
-  state_set CREATED_SSH_SECRETS "1"
 fi
 
 # ---------------------------------------------------------------------------
@@ -440,8 +445,13 @@ if [[ "$SEED_TOKEN" == "1" ]]; then
     "https://api.github.com/app/installations/$inst_id/access_tokens" | jq -r '.token')
   [[ -n "$tok" && "$tok" != "null" ]] || die "failed to mint installation token."
   exp=$(date -u -d '+55 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+55M +%Y-%m-%dT%H:%M:%SZ)
-  run az keyvault secret set --vault-name "$KV_NAME" --name github-app-token --value "$tok" --expires "$exp" -o none
-  ok "stored github-app-token (expires $exp; the refresh workflow keeps it fresh from here)"
+  if [[ "$DRY_RUN" == "1" ]] || retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" \
+       --name github-app-token --value "$tok" --expires "$exp" -o none; then
+    ok "stored github-app-token (expires $exp; the refresh workflow keeps it fresh from here)"
+  else
+    ROLE_FAILURES=$((ROLE_FAILURES + 1))
+    warn "could not write github-app-token to Key Vault - re-run with --seed-token once data-plane access is ready."
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -468,3 +478,11 @@ $( [[ "$SEED_TOKEN" == "1" ]] || echo "  - Run the 'Refresh GitHub App Token in 
 
   State recorded in: $STATE_FILE  (teardown.sh reads this)
 EOF
+
+if [[ "${ROLE_FAILURES:-0}" -gt 0 ]]; then
+  warn ""
+  warn "$ROLE_FAILURES grant/step did not complete (see the 'could NOT grant' lines above)."
+  warn "New subscriptions frequently reject the first few RBAC writes - just re-run:"
+  warn "  ./bootstrap.sh --subscription-id $SUBSCRIPTION_ID${GITHUB_APP_ID:+ --github-app-id $GITHUB_APP_ID}${GITHUB_APP_KEY_FILE:+ --github-app-private-key-file $GITHUB_APP_KEY_FILE}$( [[ "$SET_GITHUB" == 1 ]] && echo ' --set-github')$( [[ "$SEED_TOKEN" == 1 ]] && echo ' --seed-token')$( [[ "$WITH_POLLER" == 1 ]] && echo ' --with-poller')"
+  exit 1
+fi
