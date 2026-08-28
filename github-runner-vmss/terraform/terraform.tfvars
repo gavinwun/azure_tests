@@ -12,9 +12,10 @@ pep_subnet_name          = "snet-pep"
 # false (default): the names above point at an existing landing-zone
 # network - see README for the Reader/Network Contributor/Private DNS
 # Zone Contributor role grants the deploy identity needs in that case.
-# true: Terraform creates the resource group/VNet/subnets/DNS zone
-# itself using the names above - see README's manage_network note for
-# the one extra permission that needs granting first.
+# true: rg-network-hub must already exist with the deploy identity
+# holding Contributor on it; Terraform then creates the VNet/subnets/
+# DNS zone inside it using the names above. See README's manage_network
+# note - Terraform never creates or owns the resource group itself.
 manage_network = true
 # vnet_address_space                = ["10.0.0.0/16"]
 # devopsagent_subnet_address_prefix = "10.0.1.0/24"

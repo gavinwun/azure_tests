@@ -20,7 +20,7 @@ variable "vnet_resource_group_name" {
 }
 
 variable "manage_network" {
-  description = "If true, Terraform creates the hub resource group, VNet, subnets, and private DNS zone itself instead of looking up existing ones - see network.tf. Useful for a from-scratch or throwaway environment. Leave false (default) if vnet_resource_group_name/vnet_name/etc. already point at a real landing-zone network - that's the original, still-supported behaviour."
+  description = "If true, Terraform creates the VNet, subnets, and private DNS zone inside the (already-existing) vnet_resource_group_name - see network.tf. Useful for a from-scratch or throwaway environment where only the resource group is provisioned ahead of time. Leave false (default) if vnet_name/the subnets/the DNS zone already exist too - that's the original, still-supported behaviour. Either way the resource group named by vnet_resource_group_name must already exist; Terraform never manages it (data.azurerm_resource_group.network_hub)."
   type        = bool
   default     = false
 }

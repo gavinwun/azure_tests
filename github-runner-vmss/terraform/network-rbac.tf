@@ -9,28 +9,23 @@
 # the Contributor / RBAC Administrator grants scoped to
 # var.resource_group_name (see README step 7.3).
 #
-# When var.manage_network is true, none of this is needed: network.tf
-# creates the hub resource group itself, which already requires the
-# deploy identity to have Contributor scoped there (see README's
-# manage_network note) - a superset of everything these three roles
-# exist to grant.
+# When var.manage_network is true, none of this is needed: the hub
+# resource group is expected to already exist with the deploy identity
+# holding Contributor on it (see README's manage_network note) - a
+# superset of everything these three roles exist to grant. network.tf
+# then creates the VNet/subnets/DNS zone inside it.
 #
 # IMPORTANT - bootstrap chicken-and-egg: the very first `terraform plan`
 # on a fresh deploy identity still needs a ONE-TIME MANUAL grant of at
 # least "Reader" on the hub resource group before it can even read the
-# data sources in data.tf, since Terraform evaluates data sources before
-# any resource in this file exists to grant that access. See README step
-# 7.3 for that one-off `az role assignment create` command. Once that
-# exists, the resources below take over - if the deploy identity is ever
-# recreated (not just re-authenticated), the manual step must be
-# repeated once for the new identity, same category as the tfstate
-# storage account bootstrap in step 7.1.
-
-data "azurerm_resource_group" "network_hub" {
-  count = var.compute_backend == "vmss" && !var.manage_network ? 1 : 0
-
-  name = var.vnet_resource_group_name
-}
+# data sources in data.tf (data.azurerm_resource_group.network_hub and,
+# when manage_network is false, the subnet/DNS lookups), since Terraform
+# evaluates data sources before any resource in this file exists to grant
+# that access. See README step 7.3 for that one-off `az role assignment
+# create` command. Once that exists, the resources below take over - if
+# the deploy identity is ever recreated (not just re-authenticated), the
+# manual step must be repeated once for the new identity, same category
+# as the tfstate storage account bootstrap in step 7.1.
 
 # Covers the data "azurerm_subnet" x2 and general read access data.tf
 # needs against the hub resource group.

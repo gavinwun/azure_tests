@@ -4,6 +4,20 @@ data "azurerm_resource_group" "mgmt_devops" {
   name = var.resource_group_name
 }
 
+# The hub-network resource group - referenced, never created, in BOTH
+# manage_network modes: when false, network-rbac.tf scopes its grants
+# here and data.tf's subnet/DNS lookups live in it; when true, network.tf
+# creates the VNet/subnets/DNS zone inside it. Keeping the RG itself out
+# of Terraform's state means the deploy identity only ever needs a role
+# scoped to this one RG (never the subscription), and `terraform destroy`
+# can't take a shared or client-owned network RG with it. Pre-create it
+# and grant the deploy identity Contributor on it - see README step 7.3.
+data "azurerm_resource_group" "network_hub" {
+  count = var.compute_backend == "vmss" ? 1 : 0
+
+  name = var.vnet_resource_group_name
+}
+
 # Shared by both backends - VMSS's script/SSH-key fetch and ACI's
 # managed-identity Key Vault fetch both use this vault.
 data "azurerm_key_vault" "mgmt_devops" {

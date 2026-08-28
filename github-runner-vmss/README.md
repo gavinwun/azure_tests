@@ -27,7 +27,7 @@ terraform/
   variables.tf                 Input variables, including compute_backend
   locals.tf                    Naming
   data.tf                      References to your existing RG/VNet/subnets/DNS/Key Vault (manage_network = false)
-  network.tf                   VMSS-only, optional: creates the hub network instead (manage_network = true)
+  network.tf                   VMSS-only, optional: creates the VNet/subnets/DNS zone inside an existing hub RG (manage_network = true)
   network-rbac.tf              VMSS-only: grants the deploy identity access to an existing hub-network RG
   keyvault-rbac.tf             VMSS-only: grants the deploy identity secret-read access to the Key Vault
   versions.tf                  Provider constraints
@@ -514,17 +514,15 @@ workflow carrying that blast radius.
 
    **Don't have an existing hub network to point at?** Set
    `manage_network = true` in `terraform.tfvars` and Terraform creates
-   the resource group/VNet/subnets/private DNS zone itself
-   (`network.tf`), instead of assuming they already exist. This skips
-   everything below in this sub-step - none of the Reader/Network
-   Contributor/Private DNS Zone Contributor grants are needed, since
-   creating that resource group already requires Contributor there
-   (a superset of all three). What it doesn't skip: creating a brand
-   new resource group needs the deploy identity to have write access at
-   a scope that doesn't exist yet, so **pre-create the empty resource
-   group and grant Contributor on it**, same shape as the existing
-   `resource_group_name` grant above but targeting
-   `vnet_resource_group_name` instead:
+   the VNet / subnets / private DNS zone (`network.tf`), instead of
+   assuming they already exist. This skips the Reader / Network
+   Contributor / Private DNS Zone Contributor grants below - all three
+   are covered by a single `Contributor` grant on the hub resource
+   group. Terraform does **not** create or own that resource group - it
+   reads it via `data.azurerm_resource_group.network_hub`, the same way
+   it reads the main one - so **pre-create it and grant `Contributor` on
+   it**, same shape as the existing `resource_group_name` grant above but
+   targeting `vnet_resource_group_name`:
    ```bash
    az group create --name <vnet-resource-group-name> --location <location>
    az role assignment create \
@@ -532,12 +530,18 @@ workflow carrying that blast radius.
      --role "Contributor" \
      --scope $(az group show --name <vnet-resource-group-name> --query id -o tsv)
    ```
-   If `vnet_resource_group_name` is the same value as
-   `resource_group_name`, this is already covered by the grant above -
-   skip it. Leave `manage_network` at its default `false` if you're
-   pointing at a real landing-zone network someone else manages; only
-   flip it for a from-scratch environment, a demo, or a throwaway test
-   deployment.
+   Keeping the resource group out of Terraform's state means the deploy
+   identity only ever needs a role scoped to that one RG - never the
+   subscription - and `terraform destroy` can't take the network RG with
+   it. (Same one-time-per-identity `Reader` bootstrap caveat as the
+   `manage_network = false` case applies: the very first `plan` reads
+   this RG via a data source before any grant in `network-rbac.tf` could
+   exist - the `Contributor` grant above satisfies it.) If
+   `vnet_resource_group_name` equals `resource_group_name`, the grant
+   above already covers this - skip it. Leave `manage_network` at its
+   default `false` if you're pointing at a real landing-zone network
+   someone else manages; only flip it for a from-scratch environment, a
+   demo, or a throwaway test deployment.
 
    **If your `data.tf` references resources outside the main resource
    group** - e.g. a separate hub/landing-zone resource group holding the

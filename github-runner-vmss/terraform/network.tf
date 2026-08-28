@@ -1,33 +1,32 @@
 #####################################################################
-# Optional: let Terraform create the hub network itself
+# Optional: let Terraform create the hub network inside an existing RG
 #####################################################################
 # Everything below is gated by var.manage_network (default false, so
 # existing deployments pointing at a real landing-zone VNet see no
 # change in behaviour). Set manage_network = true in terraform.tfvars
-# to have this module create rg-network-hub / vnet-hub / the two
-# subnets / the private DNS zone itself instead of assuming they
+# to have this module create vnet-hub / the two subnets / the private
+# DNS zone inside var.vnet_resource_group_name, instead of assuming they
 # already exist - useful for a from-scratch environment, a demo, or a
 # throwaway test deployment. On a real landing zone, leave this false
 # and keep data.tf pointing at your platform team's actual network.
+#
+# The resource group itself is NOT created here - it's read via
+# data.azurerm_resource_group.network_hub (data.tf) in both modes.
+# Pre-create it and grant the deploy identity Contributor on it (README
+# step 7.3): that keeps the identity's rights scoped to one named RG
+# rather than the subscription, and means `terraform destroy` can never
+# delete a network RG this module doesn't own.
 #
 # The *_name variables (vnet_name, devopsagent_subnet_name, etc.) are
 # reused either way - when manage_network = true they're the names
 # Terraform assigns to what it creates, rather than names it looks up.
 
-resource "azurerm_resource_group" "network_hub_managed" {
-  count = var.compute_backend == "vmss" && var.manage_network ? 1 : 0
-
-  name     = var.vnet_resource_group_name
-  location = data.azurerm_resource_group.mgmt_devops.location
-  tags     = local.tags
-}
-
 resource "azurerm_virtual_network" "hub_managed" {
   count = var.compute_backend == "vmss" && var.manage_network ? 1 : 0
 
   name                = var.vnet_name
-  resource_group_name = azurerm_resource_group.network_hub_managed[0].name
-  location            = azurerm_resource_group.network_hub_managed[0].location
+  resource_group_name = data.azurerm_resource_group.network_hub[0].name
+  location            = data.azurerm_resource_group.network_hub[0].location
   address_space       = var.vnet_address_space
   tags                = local.tags
 }
@@ -36,7 +35,7 @@ resource "azurerm_subnet" "devopsagent_managed" {
   count = var.compute_backend == "vmss" && var.manage_network ? 1 : 0
 
   name                 = var.devopsagent_subnet_name
-  resource_group_name  = azurerm_resource_group.network_hub_managed[0].name
+  resource_group_name  = data.azurerm_resource_group.network_hub[0].name
   virtual_network_name = azurerm_virtual_network.hub_managed[0].name
   address_prefixes     = [var.devopsagent_subnet_address_prefix]
 }
@@ -45,7 +44,7 @@ resource "azurerm_subnet" "pep_managed" {
   count = var.compute_backend == "vmss" && var.manage_network ? 1 : 0
 
   name                 = var.pep_subnet_name
-  resource_group_name  = azurerm_resource_group.network_hub_managed[0].name
+  resource_group_name  = data.azurerm_resource_group.network_hub[0].name
   virtual_network_name = azurerm_virtual_network.hub_managed[0].name
   address_prefixes     = [var.pep_subnet_address_prefix]
 
@@ -58,7 +57,7 @@ resource "azurerm_private_dns_zone" "blob_managed" {
   count = var.compute_backend == "vmss" && var.manage_network ? 1 : 0
 
   name                = var.blob_private_dns_zone_name
-  resource_group_name = azurerm_resource_group.network_hub_managed[0].name
+  resource_group_name = data.azurerm_resource_group.network_hub[0].name
   tags                = local.tags
 }
 
@@ -69,7 +68,7 @@ resource "azurerm_private_dns_zone_virtual_network_link" "blob_managed" {
   count = var.compute_backend == "vmss" && var.manage_network ? 1 : 0
 
   name                  = "${var.vnet_name}-blob-link"
-  resource_group_name   = azurerm_resource_group.network_hub_managed[0].name
+  resource_group_name   = data.azurerm_resource_group.network_hub[0].name
   private_dns_zone_name = azurerm_private_dns_zone.blob_managed[0].name
   virtual_network_id    = azurerm_virtual_network.hub_managed[0].id
   registration_enabled  = false

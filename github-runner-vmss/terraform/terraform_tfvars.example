@@ -8,8 +8,10 @@ devopsagent_subnet_name   = "snet-devopsagent"
 pep_subnet_name           = "snet-pep"
 
 # false (default): the names above point at an existing landing-zone
-# network. true: Terraform creates the resource group/VNet/subnets/DNS
-# zone itself using the names above - see README's manage_network note.
+# network. true: vnet_resource_group_name must already exist (with the
+# deploy identity holding Contributor on it); Terraform then creates the
+# VNet/subnets/DNS zone inside it using the names above. Terraform never
+# creates or owns the resource group. See README's manage_network note.
 manage_network = false
 # vnet_address_space                = ["10.0.0.0/16"]
 # devopsagent_subnet_address_prefix = "10.0.1.0/24"
