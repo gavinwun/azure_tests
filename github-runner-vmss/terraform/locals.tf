@@ -20,6 +20,74 @@ locals {
   #   Syslog | where Facility == "local0"
   bootstrap_syslog_facility = "local0"
 
+  # ---------------------------------------------------------------------
+  # CustomScript preamble (vmss backend). Downloads bootstrap_agent.sh
+  # from the private blob using the VM's managed identity, then runs it.
+  #
+  # This is authored as a real bash script and shipped base64-encoded,
+  # NOT as an inline `bash -c "..."` string: the CustomScript handler
+  # executes commandToExecute via `/bin/sh -c`, which would expand every
+  # $VAR / $(...) itself before bash ever saw them. base64 has no shell
+  # metacharacters, so `sh` passes it through untouched.
+  # ---------------------------------------------------------------------
+  bootstrap_agent_url = join("", [
+    "https://",
+    one(azurerm_storage_account.bootstrap[*].name),
+    ".blob.core.windows.net/",
+    one(azurerm_storage_container.scripts[*].name),
+    "/",
+    one(azurerm_storage_blob.bootstrap_script[*].name),
+  ])
+
+  bootstrap_preamble_script = <<-EOT
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    mkdir -p /var/log/bootstrap
+    exec >> /var/log/bootstrap/bootstrap-download.log 2>&1
+    echo "=== CustomScript preamble $(date -u) ==="
+
+    # Run-once guard. CustomScript re-executes on every instance model
+    # update (VM resize, image bump, VMSS auto-repair). bootstrap_agent.sh
+    # writes this sentinel as its final step, so a failed first boot still
+    # retries; a completed one is skipped here before any download.
+    if [ -f /var/lib/ghrunner/.bootstrapped ]; then
+      echo "instance already bootstrapped - skipping"
+      exit 0
+    fi
+
+    SCRIPT_URL="${local.bootstrap_agent_url}"
+    TOKEN_URI="http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F"
+
+    # jq isn't installed on the stock image yet (bootstrap_agent.sh installs
+    # it) - parse the IMDS token response with grep/sed. Retry: IMDS can be
+    # briefly unavailable very early in boot.
+    TOKEN=$(curl -s --retry 5 --retry-delay 3 --retry-connrefused \
+      -H "Metadata:true" "$TOKEN_URI" \
+      | grep -o '"access_token":"[^"]*' | sed 's/"access_token":"//')
+    if [ -z "$TOKEN" ]; then
+      echo "could not obtain a managed-identity token from IMDS" >&2
+      exit 1
+    fi
+
+    curl -sS --fail --retry 5 --retry-delay 5 --retry-connrefused \
+      -H "Authorization: Bearer $TOKEN" \
+      -H "x-ms-version: 2020-10-02" \
+      -H "x-ms-date: $(date -u '+%a, %d %b %Y %H:%M:%S GMT')" \
+      -o /var/log/bootstrap/bootstrap_agent.sh \
+      "$SCRIPT_URL"
+
+    if [ ! -s /var/log/bootstrap/bootstrap_agent.sh ]; then
+      echo "downloaded bootstrap_agent.sh is empty" >&2
+      exit 1
+    fi
+
+    chmod +x /var/log/bootstrap/bootstrap_agent.sh
+    /var/log/bootstrap/bootstrap_agent.sh > /var/log/bootstrap/bootstrap.log 2>&1
+  EOT
+
+  bootstrap_command = "echo ${base64encode(local.bootstrap_preamble_script)} | base64 -d | bash"
+
   # Storage account names: 3-24 chars, lowercase alphanumeric only, globally unique
   bootstrap_storage_account_name = substr(
     lower(replace("stghrunboot${random_string.suffix.result}", "-", "")),

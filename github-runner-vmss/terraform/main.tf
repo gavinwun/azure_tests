@@ -287,40 +287,15 @@ resource "azurerm_virtual_machine_scale_set_extension" "bootstrap_devops_agent" 
   })
 
   # -----------------------------------------------------------------
-  # Use the VM's managed identity to pull an OAuth token for
-  # storage.azure.com, then use that to authenticate a plain HTTPS GET
-  # against the private blob (no SAS token, no storage key - matches
-  # shared_access_key_enabled = false on the storage account above).
+  # Uses the VM's managed identity to pull an OAuth token for
+  # storage.azure.com, then a plain HTTPS GET against the private blob
+  # (no SAS token, no storage key - matches shared_access_key_enabled =
+  # false on the storage account above). The script is defined in
+  # locals.tf and shipped base64-encoded - see the comment there for why
+  # it can't be an inline `bash -c "..."` string.
   # -----------------------------------------------------------------
   protected_settings = jsonencode({
-    commandToExecute = join(" ", [
-      "bash -c \"",
-      "set -euo pipefail;",
-      "mkdir -p /var/log/bootstrap;",
-      # Run-once guard. CustomScript re-executes commandToExecute on every
-      # instance model update - a VM resize, an image bump, auto-repair.
-      # bootstrap_agent.sh is a first-boot provisioner and isn't safe to
-      # re-run, so bail out here if it already finished. The sentinel is
-      # written by bootstrap_agent.sh as its final step, so a failed first
-      # boot still retries.
-      "if [ -f /var/lib/ghrunner/.bootstrapped ]; then echo 'DevOpsBootstrap: instance already bootstrapped - skipping re-run'; exit 0; fi;",
-      "LOG=/var/log/bootstrap/bootstrap-download.log;",
-
-      "SCRIPT_URL='https://${azurerm_storage_account.bootstrap[0].name}.blob.core.windows.net/${azurerm_storage_container.scripts[0].name}/${azurerm_storage_blob.bootstrap_script[0].name}';",
-      "TOKEN_URI='http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F';",
-      # jq isn't installed on a vanilla Ubuntu image yet at this point
-      # (bootstrap_agent.sh is what installs it) - parse with grep/sed instead.
-      "TOKEN=$(curl -s -H Metadata:true \\\"$TOKEN_URI\\\" | grep -o '\\\"access_token\\\":\\\"[^\\\"]*' | sed 's/\\\"access_token\\\":\\\"//');",
-
-      "curl -sS -H \\\"Authorization: Bearer $TOKEN\\\" -H 'x-ms-version: 2020-10-02' ",
-      "-H \\\"x-ms-date: $(date -u '+%a, %d %b %Y %H:%M:%S GMT')\\\" ",
-      "-o /var/log/bootstrap/bootstrap_agent.sh \\\"$SCRIPT_URL\\\" 2>>\\\"$LOG\\\" ",
-      "|| { cat \\\"$LOG\\\"; exit 1; };",
-
-      "chmod +x /var/log/bootstrap/bootstrap_agent.sh;",
-      "/var/log/bootstrap/bootstrap_agent.sh > /var/log/bootstrap/bootstrap.log 2>&1;",
-      "\""
-    ])
+    commandToExecute = local.bootstrap_command
   })
 
   depends_on = [
