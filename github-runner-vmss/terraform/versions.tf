@@ -24,6 +24,7 @@ terraform {
 # left out here since it's almost certainly defined elsewhere in your module
 # tree (backend config, subscription_id, feature flags, etc.)
 provider "azurerm" {
-  use_oidc = true
+  use_oidc            = true
+  storage_use_azuread = true
   features {}
 }

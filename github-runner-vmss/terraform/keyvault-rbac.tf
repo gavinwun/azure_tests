@@ -15,10 +15,10 @@
 # secret - see README step 7.3. Once that exists, this resource takes
 # over going forward (e.g. if the deploy identity is ever recreated).
 
-resource "azurerm_role_assignment" "pipeline_kv_secrets_user" {
-  count = var.compute_backend == "vmss" ? 1 : 0
+# resource "azurerm_role_assignment" "pipeline_kv_secrets_user" {
+#   count = var.compute_backend == "vmss" ? 1 : 0
 
-  scope                = data.azurerm_key_vault.mgmt_devops.id
-  role_definition_name = "Key Vault Secrets User"
-  principal_id         = data.azurerm_client_config.current.object_id
-}
+#   scope                = data.azurerm_key_vault.mgmt_devops.id
+#   role_definition_name = "Key Vault Secrets User"
+#   principal_id         = data.azurerm_client_config.current.object_id
+# }
