@@ -36,21 +36,29 @@ jobs:
         id: queue-count
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUNNER_SCOPE: ${{ vars.GITHUB_RUNNER_SCOPE || 'org' }}
           GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+          TARGET_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # total_count on the org-level "list workflow runs" endpoint,
-          # filtered to queued status. This counts queued *runs*, not
-          # individual jobs within a run - a reasonable approximation
-          # for a first pass; revisit if a single workflow commonly
-          # fans out into many parallel jobs your labels would matter for.
+          # total_count on the "list workflow runs" endpoint, filtered to
+          # queued status - org-wide, or this-repo-only when
+          # GITHUB_RUNNER_SCOPE=repo (personal account). Counts queued
+          # *runs*, not individual jobs within a run - a reasonable
+          # approximation for a first pass; revisit if a single workflow
+          # commonly fans out into many parallel jobs your labels matter for.
+          if [ "${RUNNER_SCOPE}" = "repo" ]; then
+            API_BASE="https://api.github.com/repos/${TARGET_REPO}"
+          else
+            API_BASE="https://api.github.com/orgs/${GITHUB_ORG}"
+          fi
           COUNT=$(curl -s \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/${GITHUB_ORG}/actions/runs?status=queued&per_page=1" \
+            "${API_BASE}/actions/runs?status=queued&per_page=1" \
             | jq -r '.total_count')
           echo "queued=${COUNT}" >> "$GITHUB_OUTPUT"
-          echo "Queued workflow runs: ${COUNT}"
+          echo "Queued workflow runs (${RUNNER_SCOPE}): ${COUNT}"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2

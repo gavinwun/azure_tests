@@ -7,9 +7,21 @@
 # next pass.
 set -euo pipefail
 
-: "${GITHUB_ORG:?GITHUB_ORG env var required}"
+: "${GITHUB_SCOPE:=org}"                    # "org" or "repo"
 : "${KEYVAULT_NAME:?KEYVAULT_NAME env var required}"
 : "${KEYVAULT_SECRET_NAME:=github-app-token}"
+
+# Scope -> REST base + attach URL. "org" needs GITHUB_ORG; "repo" needs
+# GITHUB_REPO ("owner/repo") - use "repo" for a personal account.
+if [[ "${GITHUB_SCOPE}" == "repo" ]]; then
+  : "${GITHUB_REPO:?GITHUB_REPO env var required when GITHUB_SCOPE=repo}"
+  GH_API_BASE="https://api.github.com/repos/${GITHUB_REPO}"
+  GH_RUNNER_URL="https://github.com/${GITHUB_REPO}"
+else
+  : "${GITHUB_ORG:?GITHUB_ORG env var required when GITHUB_SCOPE=org}"
+  GH_API_BASE="https://api.github.com/orgs/${GITHUB_ORG}"
+  GH_RUNNER_URL="https://github.com/${GITHUB_ORG}"
+fi
 
 RUNNER_LABELS="self-hosted,linux,x64,aci"
 RUNNER_GROUP="default"
@@ -37,7 +49,7 @@ fi
 REG_TOKEN=$(curl -s -X POST \
   -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/orgs/${GITHUB_ORG}/actions/runners/registration-token" \
+  "${GH_API_BASE}/actions/runners/registration-token" \
   | jq -r '.token')
 
 if [[ -z "${REG_TOKEN}" || "${REG_TOKEN}" == "null" ]]; then
@@ -48,7 +60,7 @@ fi
 INSTANCE_NAME="aci-runner-$(hostname)"
 
 sudo -u actions-runner ./config.sh \
-  --url "https://github.com/${GITHUB_ORG}" \
+  --url "${GH_RUNNER_URL}" \
   --token "${REG_TOKEN}" \
   --name "${INSTANCE_NAME}" \
   --labels "${RUNNER_LABELS}" \

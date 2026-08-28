@@ -34,6 +34,16 @@ admin_username = "azureuser"
 github_org  = "gavinwun"
 environment = "production"
 
+# "org": runners register at the GitHub org level (App needs Organization
+#   -> Self-hosted runners: Read and write).
+# "repo": runners register on a single repo - use this for a PERSONAL
+#   account (no org runners); App needs Repository -> Administration: R/W,
+#   and github_repo below must be set. Keep in sync with GITHUB_SCOPE in
+#   terraform/scripts/bootstrap_agent.sh and the GITHUB_RUNNER_SCOPE repo
+#   variable.
+github_runner_scope = "repo"
+github_repo         = "gavinwun/azure_tests"
+
 # "vmss" (default) or "aci" - see README for the full switch-over
 # procedure before changing this on a live deployment.
 compute_backend = "vmss"

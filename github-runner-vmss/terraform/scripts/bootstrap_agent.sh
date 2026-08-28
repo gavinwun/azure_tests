@@ -15,13 +15,32 @@ echo "Starting bootstrap at $(date -u)"
 # ---------------------------------------------------------------------
 # Config - adjust for your org/repo and Key Vault
 # ---------------------------------------------------------------------
-GITHUB_ORG="gavinwun"
+# GITHUB_SCOPE picks where each instance registers as a runner:
+#   "org"  - organisation-level runner. Needs the GitHub App's
+#            Organisation -> "Self-hosted runners: Read and write" permission.
+#   "repo" - single-repository runner (use this for a personal account,
+#            which has no org-level runners). Needs the App's
+#            Repository -> "Administration: Read and write" permission.
+GITHUB_SCOPE="repo"                          # "org" or "repo"
+GITHUB_ORG="gavinwun"                        # used when GITHUB_SCOPE=org
+GITHUB_REPO="gavinwun/azure_tests"           # "owner/repo", used when GITHUB_SCOPE=repo
 KEYVAULT_NAME="kv-ghrunner-25818"
 KEYVAULT_SECRET_NAME="github-app-token"     # short-lived GitHub App installation token
 RUNNER_VERSION="2.337.0"                     # pin, bump deliberately
 DOTNET_CHANNEL="10.0"
 RUNNER_LABELS="self-hosted,linux,x64,vmss"
 RUNNER_GROUP="default"
+
+# Resolve the scope to the two things the runner API actually needs: a REST
+# base for the registration/removal token endpoints, and the --url the
+# runner attaches to. Everything downstream uses these, not GITHUB_ORG.
+if [[ "${GITHUB_SCOPE}" == "repo" ]]; then
+  GH_API_BASE="https://api.github.com/repos/${GITHUB_REPO}"
+  GH_RUNNER_URL="https://github.com/${GITHUB_REPO}"
+else
+  GH_API_BASE="https://api.github.com/orgs/${GITHUB_ORG}"
+  GH_RUNNER_URL="https://github.com/${GITHUB_ORG}"
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -96,11 +115,11 @@ GITHUB_TOKEN=$(curl -s \
   "https://${KEYVAULT_NAME}.vault.azure.net/secrets/${KEYVAULT_SECRET_NAME}?api-version=7.4" \
   | jq -r '.value')
 
-# --- Exchange for a short-lived runner REGISTRATION token (org-level) ---
+# --- Exchange for a short-lived runner REGISTRATION token (org or repo) ---
 REG_TOKEN=$(curl -s -X POST \
   -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/orgs/${GITHUB_ORG}/actions/runners/registration-token" \
+  "${GH_API_BASE}/actions/runners/registration-token" \
   | jq -r '.token')
 
 if [[ -z "${REG_TOKEN}" || "${REG_TOKEN}" == "null" ]]; then
@@ -111,7 +130,7 @@ fi
 INSTANCE_NAME="vmss-runner-$(hostname)"
 
 sudo -u actions-runner ./config.sh \
-  --url "https://github.com/${GITHUB_ORG}" \
+  --url "${GH_RUNNER_URL}" \
   --token "${REG_TOKEN}" \
   --name "${INSTANCE_NAME}" \
   --labels "${RUNNER_LABELS}" \
@@ -141,7 +160,7 @@ cat > /opt/actions-runner/terminate-watcher.sh <<EOF
 set -uo pipefail   # no -e: this loops indefinitely and retries through transient errors
 
 IMDS_EVENTS_URL="http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01"
-GITHUB_ORG="${GITHUB_ORG}"
+GH_API_BASE="${GH_API_BASE}"
 KEYVAULT_NAME="${KEYVAULT_NAME}"
 KEYVAULT_SECRET_NAME="${KEYVAULT_SECRET_NAME}"
 RUNNER_DIR="/opt/actions-runner"
@@ -173,7 +192,7 @@ deregister_runner() {
   remove_token=\$(curl -s -X POST \\
     -H "Authorization: Bearer \${gh_token}" \\
     -H "Accept: application/vnd.github+json" \\
-    "https://api.github.com/orgs/\${GITHUB_ORG}/actions/runners/remove-token" \\
+    "\${GH_API_BASE}/actions/runners/remove-token" \\
     | jq -r '.token')
 
   if [[ -z "\${remove_token}" || "\${remove_token}" == "null" ]]; then

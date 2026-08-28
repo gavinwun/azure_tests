@@ -30,6 +30,12 @@ admin_username = "azureuser"
 github_org  = "your-org"
 environment = "dev"
 
+# "org" (default): runners register org-wide. "repo": single repo, for a
+# personal account - set github_repo and keep in sync with GITHUB_SCOPE in
+# bootstrap_agent.sh / entrypoint.sh and the GITHUB_RUNNER_SCOPE repo var.
+github_runner_scope = "org"
+github_repo         = ""   # "owner/repo", required when github_runner_scope = "repo"
+
 # "vmss" (default) or "aci" - see README for the full switch-over
 # procedure before changing this on a live deployment.
 compute_backend = "vmss"

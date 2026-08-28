@@ -1,28 +1,41 @@
 #!/usr/bin/env bash
 #
-# bootstrap.sh - do every manual, one-off pre-Terraform step from ../README.md
-# in a single idempotent pass.
+# bootstrap.sh - the one-off, pre-Terraform setup from ../README.md
+# ("Setup" section) in a single idempotent pass.
 #
-# Covers (README "Setup order matters"):
-#   0  management resource group + RBAC Key Vault + your Secrets Officer grant
-#   5  VMSS SSH key pair -> Key Vault secrets
-#   7.1  tfstate storage account + container + your Blob Data Contributor grant
-#   7.3  network hub resource group (manage_network = true)
-#   2  "gh-runner-token-refresh"        app + SP + federated creds + KV grant
-#   7.2/7.3  "gh-runner-vmss-terraform-deploy" app + SP + federated creds + all grants
-#   B  "gh-runner-queue-poller"         app + SP + federated cred        (--with-poller)
-#   3/7.4  GitHub repo variables + secrets + "production" environment    (--set-github)
-#   4  seed the github-app-token Key Vault secret                        (--seed-token)
+# Creates / configures (README step in brackets):
+#   - management resource group + RBAC Key Vault + your Secrets Officer grant   [0]
+#   - tfstate storage account + container + your Blob Data Contributor grant    [7.1]
+#   - network hub resource group, when manage_network = true                    [7.3]
+#   - VMSS SSH key pair -> Key Vault secrets                                     [5]
+#   - AAD app "gh-runner-token-refresh"          + SP + fed cred + KV grant      [2]
+#   - AAD app "gh-runner-vmss-terraform-deploy"  + SP + fed creds
+#       + Contributor / RBAC-Admin / Blob / KV / hub-RG role assignments        [7]
+#   - AAD app "gh-runner-queue-poller"           + SP + fed cred   (--with-poller)     [B]
+#   - GitHub repo variables + secrets + deployment environment    (--set-github)       [3 / 7.4 / 7.5]
+#       (--env-require-self-review also adds you as a required reviewer)
+#   - seeds the github-app-token Key Vault secret                 (--seed-token)       [4]
 #
-# NOT covered (genuinely can't be scripted): creating the GitHub App itself
-# (step 1) and adding org-installation permissions. Create it in the GitHub
-# UI first, then pass --github-app-id / --github-app-private-key-file here.
+# Runner scope: --runner-scope auto (default) registers runners org-level
+# for an organisation, repo-level for a personal account; force it with
+# --runner-scope org|repo. --set-github writes it to the GITHUB_RUNNER_SCOPE
+# repo variable. You still edit terraform/scripts/bootstrap_agent.sh
+# (GITHUB_SCOPE / GITHUB_ORG / GITHUB_REPO) and terraform.tfvars to match
+# (README step 6); the GitHub App permission depends on it (Organization ->
+# Self-hosted runners for org, Repository -> Administration for repo).
 #
-# Requires: bash, az (logged in), and for --set-github/--seed-token: gh
-# (logged in) / openssl / jq. Run from Git Bash, WSL, or Azure Cloud Shell.
+# Do by hand first (can't be scripted):
+#   - create the GitHub App, set its permissions for the scope, INSTALL it,
+#     download its private key                                   (README step 1)
+#   - edit terraform/scripts/bootstrap_agent.sh                   (README step 6)
+#   - az login as a user with Owner or User Access Administrator on the sub
+# then pass --github-app-id / --github-app-private-key-file here.
 #
-# Everything is idempotent: re-running skips what already exists. What it
-# creates is recorded in setup/state.env so teardown.sh can undo exactly it.
+# Requires: bash, az (logged in); plus gh (logged in) for --set-github,
+# and openssl + jq for --seed-token. Run from Git Bash, WSL, or Cloud Shell.
+#
+# Idempotent: re-running skips whatever already exists. What it creates is
+# recorded in setup/state.env so teardown.sh can undo exactly it.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +54,7 @@ GH_REPO=""                       # owner/repo - default derived from git remote
 GITHUB_APP_ID=""
 GITHUB_APP_KEY_FILE=""
 SUBJECT_FORMAT="auto"            # auto|plain|immutable
+RUNNER_SCOPE="auto"             # auto|org|repo - where runners register
 TFSTATE_RG=""                    # default: management RG
 TFSTATE_ACCOUNT=""               # default: from state.env, else generated
 TFSTATE_CONTAINER="tfstate"
@@ -70,6 +84,8 @@ Common options:
   --github-app-id <id>           GitHub App ID (step 1). Needed for --set-github/--seed-token.
   --github-app-private-key-file <path>   The App's .pem. Needed for --set-github/--seed-token.
   --subject-format auto|plain|immutable  Federated-credential subject style (default: auto = both).
+  --runner-scope auto|org|repo   Where runners register (default: auto - detects user vs org).
+                                 "repo" for a personal account; sets the GITHUB_RUNNER_SCOPE repo var.
   --tfstate-rg <name>            Resource group for the tfstate account (default: management RG).
   --tfstate-account <name>       tfstate storage account (default: reuse state.env or generate one).
   --tfstate-container <name>     tfstate blob container (default: $TFSTATE_CONTAINER).
@@ -84,6 +100,8 @@ Common options:
 Names read from $TFVARS_FILE:
   resource_group_name, key_vault_name, key_vault_resource_group_name,
   vnet_resource_group_name, manage_network, environment, github_org
+  (github_runner_scope / github_repo are for bootstrap_agent.sh - this
+   script takes --runner-scope / --github-repo instead)
 EOF
 }
 
@@ -95,6 +113,7 @@ while [[ $# -gt 0 ]]; do
     --github-app-id) GITHUB_APP_ID="$2"; shift 2 ;;
     --github-app-private-key-file) GITHUB_APP_KEY_FILE="$2"; shift 2 ;;
     --subject-format) SUBJECT_FORMAT="$2"; shift 2 ;;
+    --runner-scope) RUNNER_SCOPE="$2"; shift 2 ;;
     --tfstate-rg) TFSTATE_RG="$2"; shift 2 ;;
     --tfstate-account) TFSTATE_ACCOUNT="$2"; shift 2 ;;
     --tfstate-container) TFSTATE_CONTAINER="$2"; shift 2 ;;
@@ -112,6 +131,7 @@ done
 need az
 [[ -n "$SUBSCRIPTION_ID" ]] || die "--subscription-id is required."
 [[ "$SUBJECT_FORMAT" =~ ^(auto|plain|immutable)$ ]] || die "--subject-format must be auto|plain|immutable."
+[[ "$RUNNER_SCOPE" =~ ^(auto|org|repo)$ ]] || die "--runner-scope must be auto|org|repo."
 
 # ---------------------------------------------------------------------------
 # Resolve configuration
@@ -142,6 +162,23 @@ fi
 GH_OWNER="${GH_REPO%%/*}"
 GH_REPO_NAME="${GH_REPO##*/}"
 [[ -z "$GITHUB_ORG" ]] && GITHUB_ORG="$GH_OWNER"
+
+# Runner registration scope. "auto" -> look at the owner account type:
+# a personal account can't have org-level runners, so it gets "repo".
+if [[ "$RUNNER_SCOPE" == "auto" ]]; then
+  owner_type=""
+  if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    owner_type=$(gh api "users/$GH_OWNER" --jq '.type' 2>/dev/null || true)
+  else
+    owner_type=$(curl -fsS "https://api.github.com/users/$GH_OWNER" 2>/dev/null | tr -d '\n ' \
+      | sed -n -E 's/.*"type":"([A-Za-z]+)".*/\1/p' || true)
+  fi
+  case "$owner_type" in
+    Organization) RUNNER_SCOPE="org" ;;
+    User)         RUNNER_SCOPE="repo" ;;
+    *)            RUNNER_SCOPE="org"; warn "could not detect if '$GH_OWNER' is a user or org - assuming org. Pass --runner-scope org|repo to be sure." ;;
+  esac
+fi
 
 TFSTATE_RG="${TFSTATE_RG:-$MGMT_RG}"
 [[ -z "$TFSTATE_ACCOUNT" ]] && TFSTATE_ACCOUNT="$(state_get TFSTATE_ACCOUNT || true)"
@@ -177,6 +214,7 @@ cat <<EOF
   Hub network RG       : $HUB_RG  (manage_network=$MANAGE_NETWORK)
   tfstate             : $TFSTATE_ACCOUNT / $TFSTATE_CONTAINER  (RG: $TFSTATE_RG)
   GitHub repo         : $GH_REPO   org: $GITHUB_ORG
+  Runner scope        : $RUNNER_SCOPE $( [[ "$RUNNER_SCOPE" == repo ]] && echo "(App needs Repository -> Administration: R/W)" || echo "(App needs Organization -> Self-hosted runners: R/W)" )
   Federated subjects  : $SUBJECT_FORMAT${GH_REPO_ID:+  (owner $GH_OWNER_ID / repo $GH_REPO_ID)}
   Deploy environment  : $ENVIRONMENT
   Extras              : with-poller=$WITH_POLLER  set-github=$SET_GITHUB  seed-token=$SEED_TOKEN  dry-run=$DRY_RUN
@@ -408,6 +446,8 @@ if [[ "$SET_GITHUB" == "1" ]]; then
   gh_var TFSTATE_RESOURCE_GROUP "$TFSTATE_RG"
   gh_var TFSTATE_STORAGE_ACCOUNT "$TFSTATE_ACCOUNT"
   gh_var TFSTATE_CONTAINER      "$TFSTATE_CONTAINER"
+  gh_var GITHUB_ORG            "$GITHUB_ORG"
+  gh_var GITHUB_RUNNER_SCOPE   "$RUNNER_SCOPE"
   [[ "$WITH_POLLER" == "1" ]] && gh_var QUEUE_POLLER_AZURE_CLIENT_ID "${POLLER_APPID:-}"
 
   if [[ -n "$GITHUB_APP_ID" ]]; then
@@ -454,19 +494,35 @@ if [[ "$SEED_TOKEN" == "1" ]]; then
   jwt_p=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now-60))" "$((now+540))" "$GITHUB_APP_ID" | b64url)
   jwt_s=$(printf '%s.%s' "$jwt_h" "$jwt_p" | openssl dgst -sha256 -sign "$GITHUB_APP_KEY_FILE" -binary | b64url)
   JWT="$jwt_h.$jwt_p.$jwt_s"
-  inst_id=$(curl -fsS -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/orgs/$GITHUB_ORG/installation" | jq -r '.id')
-  [[ -n "$inst_id" && "$inst_id" != "null" ]] || die "could not find the App installation on org '$GITHUB_ORG'."
-  tok=$(curl -fsS -X POST -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.github+json" \
-    "https://api.github.com/app/installations/$inst_id/access_tokens" | jq -r '.token')
-  [[ -n "$tok" && "$tok" != "null" ]] || die "failed to mint installation token."
-  exp=$(date -u -d '+55 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+55M +%Y-%m-%dT%H:%M:%SZ)
-  if [[ "$DRY_RUN" == "1" ]] || retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" \
-       --name github-app-token --value "$tok" --expires "$exp" -o none; then
-    ok "stored github-app-token (expires $exp; the refresh workflow keeps it fresh from here)"
-  else
+  gh_api() { curl -sS -H "Authorization: Bearer $JWT" -H "Accept: application/vnd.github+json" "$@"; }
+  # The installation can be on a repo, an org, or a user account - try the
+  # repo first (works regardless of owner type), then org, then user.
+  inst_id=""
+  for u in "repos/$GH_REPO/installation" "orgs/$GITHUB_ORG/installation" "users/$GITHUB_ORG/installation"; do
+    inst_id=$(gh_api "https://api.github.com/$u" | jq -r '.id // empty')
+    [[ -n "$inst_id" ]] && break
+  done
+  tok=""
+  if [[ -z "$inst_id" ]]; then
     ROLE_FAILURES=$((ROLE_FAILURES + 1))
-    warn "could not write github-app-token to Key Vault - re-run with --seed-token once data-plane access is ready."
+    warn "GitHub App (id $GITHUB_APP_ID) has no installation on $GH_REPO / $GITHUB_ORG."
+    warn "Install it (App settings -> Install App), then re-run with --seed-token,"
+    warn "or just run the 'Refresh GitHub App Token in Key Vault' workflow once."
+  else
+    tok=$(gh_api -X POST "https://api.github.com/app/installations/$inst_id/access_tokens" | jq -r '.token // empty')
+  fi
+  if [[ "$DRY_RUN" != "1" && -z "$tok" ]]; then
+    ROLE_FAILURES=$((ROLE_FAILURES + 1))
+    warn "no installation token minted - github-app-token NOT seeded (see above)."
+  else
+    exp=$(date -u -d '+55 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+55M +%Y-%m-%dT%H:%M:%SZ)
+    if [[ "$DRY_RUN" == "1" ]] || retry 6 20 -- az keyvault secret set --vault-name "$KV_NAME" \
+         --name github-app-token --value "$tok" --expires "$exp" -o none; then
+      ok "stored github-app-token (expires $exp; the refresh workflow keeps it fresh from here)"
+    else
+      ROLE_FAILURES=$((ROLE_FAILURES + 1))
+      warn "could not write github-app-token to Key Vault - re-run with --seed-token once data-plane access is ready."
+    fi
   fi
 fi
 

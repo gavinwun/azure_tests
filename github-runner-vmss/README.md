@@ -74,8 +74,11 @@ variables/secrets, and the `production` environment.
 
 Do these by hand first — they can't be scripted:
 
-1. **Create the GitHub App** and download its private key — [step 1](#1-create-the-github-app).
-2. **Edit `terraform/scripts/bootstrap_agent.sh`** — [step 6](#6-configure-and-edit-bootstrap_agentsh).
+1. **Create the GitHub App**, set its permissions for your runner scope
+   (org vs repo — [step 1](#1-create-the-github-app)), install it, and
+   download its private key.
+2. **Edit `terraform/scripts/bootstrap_agent.sh`** — `GITHUB_SCOPE` /
+   `GITHUB_ORG` / `GITHUB_REPO` etc. ([step 6](#6-configure-and-edit-bootstrap_agentsh)).
 3. **`az login`** as a user with **Owner** or **User Access Administrator**
    on the target subscription.
 
@@ -90,10 +93,13 @@ cd setup
   --set-github --seed-token --with-poller
 ```
 
-Full flag list, the `--env-require-self-review` option, and the matching
-`teardown.sh`: [`setup/README.md`](setup/README.md). Re-running is safe -
-anything that already exists is detected and skipped. When it finishes,
-skip to [step 8 (Push and merge)](#8-push-and-merge).
+It auto-detects the runner scope (`--runner-scope auto` → `repo` for a
+personal account, `org` for an organisation) and sets the
+`GITHUB_RUNNER_SCOPE` repo variable; pass `--runner-scope org|repo` to
+override. Full flag list, the `--env-require-self-review` option, and the
+matching `teardown.sh`: [`setup/README.md`](setup/README.md). Re-running
+is safe - anything that already exists is detected and skipped. When it
+finishes, skip to [step 8 (Push and merge)](#8-push-and-merge).
 
 ---
 
@@ -168,18 +174,30 @@ other.
 This App's installation token is what lets the refresh workflow mint
 runner-registration tokens - keep its permissions minimal.
 
-1. Org Settings → Developer settings → GitHub Apps → New GitHub App
+1. Settings → Developer settings → GitHub Apps → New GitHub App (org
+   Settings for an organisation, your account Settings for a personal
+   account)
 2. Homepage URL: anything (not used)
 3. Webhook: uncheck "Active" (not needed)
-4. Permissions → Organization permissions → **Self-hosted runners: Read and write**
-   (no other permissions needed)
+4. Permissions — this depends on where the runners register (see step 6,
+   `github_runner_scope`):
+   - **Org-level runners** (`github_runner_scope = "org"`): Organization
+     permissions → **Self-hosted runners: Read and write**.
+   - **Repo-level runners** (`github_runner_scope = "repo"` — the only
+     option for a personal account): Repository permissions →
+     **Administration: Read and write**.
+   - Add **Actions: Read** (Organization or Repository, matching the
+     above) as well if you'll use the queue-depth autoscaler / ACI
+     reconciler.
 5. "Where can this GitHub App be installed?" → Only on this account
 6. Create the App, then:
    - Note the **App ID** (top of the App's settings page)
    - Generate a **private key** (.pem) - downloads once, store it securely
-7. Install the App on your org (App settings → Install App → select org →
-   All repositories, or none, since it only needs org-level runner
-   permissions, not repo access)
+7. **Install the App** (App settings → Install App) — nothing works until
+   it is. For `github_runner_scope = "repo"`, give it access to **that
+   repository** (Only select repositories). For `"org"`, install on the
+   org (All repositories or none — org-level runner permission doesn't
+   need repo access).
 
 ### 1a. Get your GitHub owner ID and repository ID
 
@@ -372,9 +390,28 @@ public and private secrets in Key Vault stay matched to the same pair.
 ### 6. Configure and edit `bootstrap_agent.sh`
 
 Open `terraform/scripts/bootstrap_agent.sh` and set:
-- `GITHUB_ORG` - your org name
+- `GITHUB_SCOPE` - `"org"` or `"repo"`. **A personal account has no
+  org-level runners, so it must be `"repo"`.** `"org"` registers each
+  instance as an organisation runner; `"repo"` registers it on one repo.
+- `GITHUB_ORG` - your org name (used when `GITHUB_SCOPE="org"`)
+- `GITHUB_REPO` - `"owner/repo"` (used when `GITHUB_SCOPE="repo"`)
 - `KEYVAULT_NAME` - same vault as above
 - `RUNNER_VERSION` - check https://github.com/actions/runner/releases and pin explicitly
+
+Keep these three in sync across the places that need them:
+
+| Setting | `bootstrap_agent.sh` / `entrypoint.sh` | `terraform.tfvars` | Repo variable |
+|---|---|---|---|
+| scope | `GITHUB_SCOPE` | `github_runner_scope` | `GITHUB_RUNNER_SCOPE` |
+| org | `GITHUB_ORG` | `github_org` | `GITHUB_ORG` |
+| repo | `GITHUB_REPO` | `github_repo` | *(workflows use `github.repository`)* |
+
+The GitHub App permission in step 1 follows from the scope: **Organization
+→ Self-hosted runners** for `"org"`, **Repository → Administration** for
+`"repo"`. `setup/bootstrap.sh` picks the scope automatically (`--runner-scope
+auto`, based on whether the owner is a user or an org) and sets the
+`GITHUB_RUNNER_SCOPE` repo variable; you still edit `bootstrap_agent.sh`
+by hand to match.
 
 ### 7. Set up remote state + a second OIDC identity for the deploy pipeline
 
@@ -757,10 +794,11 @@ first, then:
 
 ### A. Add "Actions: Read" to the GitHub App
 
-The same App from step 1 now also needs **Organization permissions →
-Actions: Read-only**, so the poller can list queued workflow runs. Edit
-the App's permissions (App settings → Permissions & events) and re-accept
-the updated permissions on the org installation.
+The same App from step 1 now also needs **Actions: Read-only** - as an
+**Organization** permission for `github_runner_scope = "org"`, or a
+**Repository** permission for `"repo"` - so the poller can list queued
+workflow runs. Edit the App's permissions (App settings → Permissions &
+events) and re-accept the update on the installation.
 
 ### B. Create a third OIDC identity for the poller
 
@@ -812,7 +850,8 @@ az role assignment create \
 | `QUEUE_POLLER_AZURE_CLIENT_ID` | App registration client ID from step B |
 | `VMSS_RESOURCE_ID` | output of `terraform output -raw vmss_id` |
 | `VMSS_REGION` | output of `terraform output -raw vmss_location`, e.g. `australiaeast` |
-| `GITHUB_ORG` | your org name (same value as `github_org` in tfvars) |
+| `GITHUB_ORG` | your org name (same value as `github_org` in tfvars) — used only when `GITHUB_RUNNER_SCOPE=org` |
+| `GITHUB_RUNNER_SCOPE` | `org` or `repo` (default `org` if unset). `repo` makes the poller count queued runs for this repo only. Set by `setup/bootstrap.sh --set-github`. |
 
 ### D. Apply and verify
 
@@ -983,7 +1022,8 @@ VMSS backend's poller.
 | `ACI_IDENTITY_ID` | `terraform output -raw aci_identity_id` |
 | `VMSS_REGION` | deployment region, e.g. `australiaeast` (reused variable name - just means "region" here, not VMSS-specific) |
 | `KEYVAULT_NAME` | same Key Vault as the base setup |
-| `GITHUB_ORG` | same as the VMSS setup |
+| `GITHUB_ORG` | same as the VMSS setup (used only when `GITHUB_RUNNER_SCOPE=org`) |
+| `GITHUB_RUNNER_SCOPE` | `org` or `repo` (default `org`). `repo` makes containers register on this repo and needs the App's Repository → Administration permission. Same value as the VMSS setup. |
 | `ACI_MIN_INSTANCES` / `ACI_MAX_INSTANCES` | optional, default 0 / 10 |
 | `ACI_CONTAINER_CPU` / `ACI_CONTAINER_MEMORY_GB` | optional, default 2 / 4 |
 | `ACI_IMAGE_TAG` | optional, default `latest` |

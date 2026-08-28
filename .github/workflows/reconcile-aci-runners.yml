@@ -35,18 +35,26 @@ jobs:
         id: queue-count
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RUNNER_SCOPE: ${{ vars.GITHUB_RUNNER_SCOPE || 'org' }}
           GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+          TARGET_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Same caveat as the VMSS poller: counts queued *runs* org-wide,
-          # not individual jobs filtered by runner label.
+          # Same caveat as the VMSS poller: counts queued *runs*, not
+          # label-filtered jobs. Org-wide, or this-repo-only when
+          # GITHUB_RUNNER_SCOPE=repo (personal account).
+          if [ "${RUNNER_SCOPE}" = "repo" ]; then
+            API_BASE="https://api.github.com/repos/${TARGET_REPO}"
+          else
+            API_BASE="https://api.github.com/orgs/${GITHUB_ORG}"
+          fi
           COUNT=$(curl -s \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/orgs/${GITHUB_ORG}/actions/runs?status=queued&per_page=1" \
+            "${API_BASE}/actions/runs?status=queued&per_page=1" \
             | jq -r '.total_count')
           echo "queued=${COUNT}" >> "$GITHUB_OUTPUT"
-          echo "Queued workflow runs: ${COUNT}"
+          echo "Queued workflow runs (${RUNNER_SCOPE}): ${COUNT}"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
@@ -91,7 +99,9 @@ jobs:
           ACI_IDENTITY_ID: ${{ vars.ACI_IDENTITY_ID }}
           LOCATION: ${{ vars.VMSS_REGION }}   # reused var name, just means "deployment region"
           KEYVAULT_NAME: ${{ vars.KEYVAULT_NAME }}
+          RUNNER_SCOPE: ${{ vars.GITHUB_RUNNER_SCOPE || 'org' }}
           GITHUB_ORG: ${{ vars.GITHUB_ORG }}
+          TARGET_REPO: ${{ github.repository }}
           IMAGE_TAG: ${{ vars.ACI_IMAGE_TAG || 'latest' }}
           MIN_INSTANCES: ${{ vars.ACI_MIN_INSTANCES || '0' }}
           MAX_INSTANCES: ${{ vars.ACI_MAX_INSTANCES || '10' }}
@@ -134,7 +144,9 @@ jobs:
               --subnet "${ACI_SUBNET_NAME}" \
               --location "${LOCATION}" \
               --environment-variables \
+                GITHUB_SCOPE="${RUNNER_SCOPE}" \
                 GITHUB_ORG="${GITHUB_ORG}" \
+                GITHUB_REPO="${TARGET_REPO}" \
                 KEYVAULT_NAME="${KEYVAULT_NAME}" \
                 KEYVAULT_SECRET_NAME="github-app-token" \
               --tags "${TAG_KEY}=${TAG_VALUE}" \

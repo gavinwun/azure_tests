@@ -84,6 +84,18 @@ The environment is optional. If you skip it entirely, drop the
 `tf-deploy-production-env` federated credential too — it's only used when
 the environment gate is active.
 
+### Runner scope (org vs repo)
+
+`--runner-scope auto` (default) checks whether the repo owner is a user or
+an organisation: a **personal account** gets `repo` (single-repo runners —
+it has no org-level runners), an **org** gets `org`. Pass
+`--runner-scope org|repo` to force it. With `--set-github` this is written
+to the `GITHUB_RUNNER_SCOPE` repo variable; you still edit
+`terraform/scripts/bootstrap_agent.sh` (`GITHUB_SCOPE` / `GITHUB_REPO`)
+and `terraform.tfvars` (`github_runner_scope` / `github_repo`) to match,
+and the GitHub App permission in README step 1 depends on it (Organization
+→ Self-hosted runners for `org`; Repository → Administration for `repo`).
+
 ### Federated-credential subject format
 
 Repos created after 2026-07-15 (or opted in) issue *immutable* OIDC

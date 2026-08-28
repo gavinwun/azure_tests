@@ -126,8 +126,29 @@ variable "admin_username" {
 }
 
 variable "github_org" {
-  description = "GitHub organisation the runners register against. Must match bootstrap_agent.sh's GITHUB_ORG."
+  description = "GitHub organisation the runners register against when github_runner_scope = \"org\". Must match bootstrap_agent.sh's GITHUB_ORG."
   type        = string
+}
+
+# Neither of the next two is consumed by Terraform (nothing here templates
+# bootstrap_agent.sh - it's hand-edited, README step 6). They live here so
+# terraform.tfvars documents the values that bootstrap_agent.sh /
+# entrypoint.sh and the GITHUB_RUNNER_SCOPE repo variable must agree on.
+variable "github_runner_scope" {
+  description = "Where instances register as runners: \"org\" (organisation-level; GitHub App needs Organization -> Self-hosted runners: Read and write) or \"repo\" (single repository - required for a personal account, which has no org runners; App needs Repository -> Administration: Read and write). Must match GITHUB_SCOPE in bootstrap_agent.sh / entrypoint.sh and the GITHUB_RUNNER_SCOPE repo variable."
+  type        = string
+  default     = "org"
+
+  validation {
+    condition     = contains(["org", "repo"], var.github_runner_scope)
+    error_message = "github_runner_scope must be \"org\" or \"repo\"."
+  }
+}
+
+variable "github_repo" {
+  description = "\"owner/repo\" the runners attach to when github_runner_scope = \"repo\". Ignored for \"org\". Must match bootstrap_agent.sh's GITHUB_REPO."
+  type        = string
+  default     = ""
 }
 
 variable "environment" {
