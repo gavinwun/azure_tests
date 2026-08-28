@@ -87,12 +87,17 @@ state_set() {
   # state_set KEY value  (last-write-wins; never writes secrets)
   local key="$1" value="$2"
   [[ "${DRY_RUN:-0}" == "1" ]] && { printf '    %s[dry-run]%s state %s=%s\n' "$_c_dim" "$_c_reset" "$key" "$value" >&2; return 0; }
-  mkdir -p "$(dirname "$STATE_FILE")"
+  local dir; dir="$(dirname "$STATE_FILE")"
+  mkdir -p "$dir"
   touch "$STATE_FILE"
-  local tmp; tmp=$(mktemp)
+  # Write the temp file in the SAME directory as the state file - mktemp's
+  # default /tmp is a different filesystem under WSL (ext4 vs drvfs), and a
+  # cross-filesystem `mv` there can silently fail to land, which is how the
+  # state file ends up empty and every run re-generates names.
+  local tmp="$dir/.state.$$.tmp"
   grep -v -E "^$key=" "$STATE_FILE" > "$tmp" 2>/dev/null || true
   printf '%s=%s\n' "$key" "$value" >> "$tmp"
-  mv "$tmp" "$STATE_FILE"
+  mv -f "$tmp" "$STATE_FILE"
 }
 
 # ---------------------------------------------------------------------------

@@ -183,8 +183,13 @@ fi
 TFSTATE_RG="${TFSTATE_RG:-$MGMT_RG}"
 [[ -z "$TFSTATE_ACCOUNT" ]] && TFSTATE_ACCOUNT="$(state_get TFSTATE_ACCOUNT || true)"
 if [[ -z "$TFSTATE_ACCOUNT" ]]; then
-  TFSTATE_ACCOUNT="sttfstate$(( RANDOM % 90000 + 10000 ))"
-  info "No tfstate account given - will use generated name: $TFSTATE_ACCOUNT"
+  # Derive a STABLE name from the subscription id (not RANDOM) so re-runs
+  # reuse the same account even if state.env was lost - "st" + 20 hex,
+  # within the 3-24 lowercase-alphanumeric limit.
+  h=$(printf '%s' "$SUBSCRIPTION_ID" | { sha256sum 2>/dev/null || shasum -a 256; } | tr -dc 'a-f0-9' | head -c 20)
+  TFSTATE_ACCOUNT="st${h}"
+  info "No --tfstate-account / none in state.env - using a name derived from the subscription id: $TFSTATE_ACCOUNT"
+  info "(pass --tfstate-account <name> if you already have a state account with a different name)"
 fi
 
 # Owner / repo numeric IDs (only needed for immutable subjects)
@@ -246,6 +251,15 @@ if az keyvault show --name "$KV_NAME" >/dev/null 2>&1; then
   skip "vault exists"
   rbac=$(az keyvault show --name "$KV_NAME" --query "properties.enableRbacAuthorization" -o tsv)
   [[ "$rbac" == "true" ]] || warn "vault $KV_NAME is NOT using RBAC authorization - every role grant in this repo will silently no-op. See README step 0."
+elif [[ "$DRY_RUN" != "1" ]] && az keyvault list-deleted --query "[?name=='$KV_NAME'] | [0].name" -o tsv 2>/dev/null | grep -q .; then
+  # Deleting the resource group soft-deletes the vault (90-day retention).
+  # A plain `create` then fails with "already exists in soft-deleted
+  # state" - recover it instead. Old secrets come back too; the SSH-key
+  # step below just overwrites them.
+  warn "vault $KV_NAME is soft-deleted - recovering it"
+  run az keyvault recover --name "$KV_NAME" -o none
+  ok "recovered vault"
+  [[ "$DRY_RUN" == "1" ]] || sleep 10
 else
   run az keyvault create --name "$KV_NAME" --resource-group "$KV_RG" --location "$LOCATION" \
     --enable-rbac-authorization true -o none
@@ -266,14 +280,23 @@ fi
 step "Terraform state storage: $TFSTATE_ACCOUNT"
 if az storage account show --name "$TFSTATE_ACCOUNT" --resource-group "$TFSTATE_RG" >/dev/null 2>&1; then
   skip "storage account exists"
-else
+elif [[ "$DRY_RUN" == "1" ]]; then
   run az storage account create --name "$TFSTATE_ACCOUNT" --resource-group "$TFSTATE_RG" \
     --location "$LOCATION" --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 \
     --allow-blob-public-access false -o none
-  run az storage account blob-service-properties update --account-name "$TFSTATE_ACCOUNT" \
+elif az storage account create --name "$TFSTATE_ACCOUNT" --resource-group "$TFSTATE_RG" \
+       --location "$LOCATION" --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 \
+       --allow-blob-public-access false -o none; then
+  az storage account blob-service-properties update --account-name "$TFSTATE_ACCOUNT" \
     --enable-versioning true -o none
   ok "created state storage account (versioning on)"
   state_set CREATED_TFSTATE_ACCOUNT "$TFSTATE_ACCOUNT"
+else
+  ROLE_FAILURES=$((ROLE_FAILURES + 1))
+  warn "could not create state storage account '$TFSTATE_ACCOUNT'"
+  warn "  - if the name is globally taken, or you already have one under a different name, list it:"
+  warn "      az storage account list -g $TFSTATE_RG --query \"[].name\" -o tsv"
+  warn "  - then re-run with:  --tfstate-account <existing-name>"
 fi
 TFSTATE_ID=$(az storage account show --name "$TFSTATE_ACCOUNT" --resource-group "$TFSTATE_RG" --query id -o tsv 2>/dev/null || echo "")
 if [[ -n "$CURRENT_USER_OID" && -n "$TFSTATE_ID" ]]; then
