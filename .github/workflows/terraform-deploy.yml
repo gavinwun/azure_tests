@@ -153,24 +153,12 @@ jobs:
             -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'
           sleep 15   # final margin for the firewall change on the data plane
 
-      # Retried: even with the wait above, blob-data-plane RBAC can take
-      # longer than 3 min to land on a brand-new account, and transient 403s
-      # clear on their own. Each attempt is a full apply, so a partial first
-      # attempt is just reconciled by the next.
       - name: Terraform Apply (Main deployment)
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          for attempt in 1 2 3 4; do
-            if terraform apply -auto-approve -input=false -var-file="terraform.tfvars" \
-                 -var="bootstrap_storage_public_network_access_enabled=true" \
-                 -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'; then
-              exit 0
-            fi
-            echo "::warning::main apply failed (attempt ${attempt}/4) - retrying in 60s (storage data-plane RBAC propagation)"
-            sleep 60
-          done
-          echo "::error::main apply still failing after 4 attempts"
-          exit 1
+          terraform apply -auto-approve -input=false -var-file="terraform.tfvars" \
+            -var="bootstrap_storage_public_network_access_enabled=true" \
+            -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'
 
       - name: Terraform Apply (re-lock storage public endpoint)
         working-directory: ${{ env.TF_WORKING_DIR }}
