@@ -132,6 +132,14 @@ resource "azurerm_virtual_machine_scale_set_extension" "ama" {
   auto_upgrade_minor_version   = true
   automatic_upgrade_enabled    = true
 
+  # AMA has no predecessor - it goes first. Set explicitly to [] rather
+  # than omitted: an earlier revision had this pointing at DevOpsBootstrap,
+  # and just deleting the argument leaves that stale value on the Azure
+  # model, which then forms a circular dependency once DevOpsBootstrap
+  # gains provision_after_extensions = ["AzureMonitorLinuxAgent"]. An
+  # explicit [] forces the provider to send an empty array and clear it.
+  provision_after_extensions = []
+
   # AMA provisions FIRST - before DevOpsBootstrap, which carries
   # provision_after_extensions = ["AzureMonitorLinuxAgent"] (see main.tf).
   # Once AMA + the DCR are up, the runner bootstrap that runs next is
