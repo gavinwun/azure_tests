@@ -132,6 +132,19 @@ resource "azurerm_virtual_machine_scale_set_extension" "ama" {
   auto_upgrade_minor_version   = true
   automatic_upgrade_enabled    = true
 
+  # AMA provisions FIRST - before DevOpsBootstrap, which carries
+  # provision_after_extensions = ["AzureMonitorLinuxAgent"] (see main.tf).
+  # Once AMA + the DCR are up, the runner bootstrap that runs next is
+  # observable in Log Analytics (facility local0) while it happens.
+  #
+  # false = fail hard. This flag does NOT control ordering/waiting
+  # (provision_after_extensions does) - it only decides whether a failure
+  # is fatal. With false, an AMA failure fails the instance operation AND
+  # blocks DevOpsBootstrap ("depends upon the VM Extension ... which has
+  # failed"), so a broken monitoring setup means no runner - deliberate:
+  # AMA rarely fails, and if it does we want to know, not ship blind.
+  failure_suppression_enabled = false
+
   settings = jsonencode({
     authentication = {
       managedIdentity = {
@@ -141,12 +154,8 @@ resource "azurerm_virtual_machine_scale_set_extension" "ama" {
     }
   })
 
-  # Let the runner come up first; monitoring is not on the critical path.
-  # Name must match azurerm_virtual_machine_scale_set_extension.bootstrap_devops_agent.
-  provision_after_extensions = ["DevOpsBootstrap"]
-
+  # DCR association carries the collection config AMA reads on start.
   depends_on = [
-    azurerm_virtual_machine_scale_set_extension.bootstrap_devops_agent,
     azurerm_monitor_data_collection_rule_association.vmss,
   ]
 }
