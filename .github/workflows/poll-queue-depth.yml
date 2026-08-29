@@ -1,13 +1,13 @@
 name: Poll GitHub Queue Depth for VMSS Autoscale
 
 on:
-  schedule:
-    # Every 5 min, offset off the hour boundary (:02, :07, :12, ...).
-    # GitHub delays or DROPS scheduled runs during top-of-hour load spikes,
-    # so avoid :00/:05. Even so, `on: schedule` is best-effort - for the
-    # enterprise deployment run this poll from Azure (Function / Container
-    # Apps job) instead of relying on GitHub's scheduler.
-    - cron: '2-59/5 * * * *'
+  # schedule:
+  #   # Every 5 min, offset off the hour boundary (:02, :07, :12, ...).
+  #   # GitHub delays or DROPS scheduled runs during top-of-hour load spikes,
+  #   # so avoid :00/:05. Even so, `on: schedule` is best-effort - for the
+  #   # enterprise deployment run this poll from Azure (Function / Container
+  #   # Apps job) instead of relying on GitHub's scheduler.
+  #   - cron: '2-59/5 * * * *'
   workflow_dispatch: {}
 
 permissions:
