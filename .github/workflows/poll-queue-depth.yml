@@ -35,33 +35,60 @@ jobs:
           # up for the token-refresh workflow - add it under the App's
           # permissions if it isn't already there.
 
-      - name: Count queued workflow runs
+      - name: Count queued jobs targeting the self-hosted runners
         id: queue-count
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RUNNER_SCOPE: ${{ vars.RUNNER_SCOPE || 'org' }}
           OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ github.repository }}
+          # A queued job counts only if its runs-on labels are a SUPERSET of
+          # every label here (comma-separated). "self-hosted" matches any
+          # self-hosted job; "self-hosted,vmss" is VMSS-specific. Default is
+          # deliberately broad - narrow it to match your runner labels.
+          RUNNER_MATCH_LABELS: ${{ vars.RUNNER_MATCH_LABELS || 'self-hosted' }}
         run: |
           set -euo pipefail
-          # total_count on the "list workflow runs" endpoint, filtered to
-          # queued status - org-wide, or this-repo-only when
-          # RUNNER_SCOPE=repo (personal account). Counts queued *runs*, not
-          # individual jobs within a run - a reasonable approximation for a
-          # first pass; revisit if a single workflow commonly fans out into
-          # many parallel jobs your labels matter for.
+
+          ghapi() { curl -s -H "Authorization: Bearer ${GH_TOKEN}" \
+                             -H "Accept: application/vnd.github+json" \
+                             -H "X-GitHub-Api-Version: 2022-11-28" "$@"; }
+
+          WANT_JSON=$(printf '%s' "${RUNNER_MATCH_LABELS}" | jq -R -c 'split(",") | map(gsub("^\\s+|\\s+$";""))')
+
+          # The runs endpoint has no runs-on filter, so we go one level down
+          # to jobs. Scan runs that could still have unstarted jobs (queued,
+          # plus in_progress for matrix legs waiting on a runner), list each
+          # run's jobs, and count jobs that are status=queued AND carry all
+          # the wanted labels.
           if [ "${RUNNER_SCOPE}" = "repo" ]; then
-            API_BASE="https://api.github.com/repos/${TARGET_REPO}"
+            REPOS="${TARGET_REPO}"
           else
-            API_BASE="https://api.github.com/orgs/${OWNER}"
+            REPOS=$(ghapi "https://api.github.com/orgs/${OWNER}/repos?per_page=100&sort=pushed" | jq -r '.[].full_name')
           fi
-          COUNT=$(curl -s \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "${API_BASE}/actions/runs?status=queued&per_page=1" \
-            | jq -r '.total_count')
+
+          COUNT=0
+          for R in ${REPOS}; do
+            RUN_IDS=$(
+              { ghapi "https://api.github.com/repos/${R}/actions/runs?status=queued&per_page=100"
+                ghapi "https://api.github.com/repos/${R}/actions/runs?status=in_progress&per_page=100"
+              } | jq -r '.workflow_runs[]?.id' | sort -u
+            )
+            for RID in ${RUN_IDS}; do
+              [ -n "${RID}" ] || continue
+              N=$(ghapi "https://api.github.com/repos/${R}/actions/runs/${RID}/jobs?per_page=100" \
+                | jq --argjson want "${WANT_JSON}" '
+                    [ .jobs[]?
+                      | select(.status == "queued")
+                      | (.labels // []) as $have
+                      | select( $want | map(. as $w | $have | index($w)) | all )
+                    ] | length')
+              COUNT=$((COUNT + N))
+            done
+          done
+
           echo "queued=${COUNT}" >> "$GITHUB_OUTPUT"
-          echo "Queued workflow runs (${RUNNER_SCOPE}): ${COUNT}"
+          echo "Queued jobs matching [${RUNNER_MATCH_LABELS}] (${RUNNER_SCOPE}): ${COUNT}"
 
       - name: Azure login (OIDC)
         uses: azure/login@v2
