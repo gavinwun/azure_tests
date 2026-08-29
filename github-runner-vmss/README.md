@@ -43,10 +43,14 @@ setup/
 docker/
   Dockerfile                   ACI only: runner image, built by build-and-push-runner-image.yml
   entrypoint.sh                ACI only: container's registration + run logic
+queue-metric-function/         VMSS only, opt-in: Consumption Function that publishes the
+                               autoscale metric from a workflow_job webhook + a 3-min timer
+                               (an alternative to poll-queue-depth.yml's cron)
 .github/workflows/
   (instances mint their own GitHub App token at boot - no refresh workflow)
   terraform-deploy.yml               CI/CD: plans on PR, applies on merge to main (both backends)
   poll-queue-depth.yml               VMSS only: publishes custom metric for autoscale
+  deploy-queue-metric-function.yml   VMSS only, opt-in: deploys queue-metric-function/
   reconcile-aci-runners.yml          ACI only: creates/deletes container groups directly
   build-and-push-runner-image.yml    ACI only: builds and pushes the runner image
 ```

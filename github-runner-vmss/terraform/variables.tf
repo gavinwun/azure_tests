@@ -216,6 +216,35 @@ variable "queue_poller_principal_id" {
   default     = ""
 }
 
+variable "runner_match_labels" {
+  description = "Comma-separated runner labels. A queued job counts toward the autoscale metric only if its runs-on labels are a superset of these. \"self-hosted,vmss\" is VMSS-specific; \"self-hosted\" is broad. Used by the queue-metric Function (and mirrored to the RUNNER_MATCH_LABELS repo variable for poll-queue-depth.yml)."
+  type        = string
+  default     = "self-hosted"
+}
+
+#########################################################################
+# Queue-depth metric Function App (queue-metric-function.tf) - opt-in
+#########################################################################
+
+variable "enable_queue_metric_function" {
+  description = "Deploy the Consumption-plan Function App that publishes the QueuedJobs autoscale metric from a GitHub workflow_job webhook + a 3-min timer. An alternative to the poll-queue-depth.yml scheduled workflow that doesn't depend on GitHub's cron firing. vmss backend only."
+  type        = bool
+  default     = false
+}
+
+variable "github_app_id" {
+  description = "Numeric GitHub App ID (App settings -> General). Consumed by the queue-metric Function to mint an installation token from the private key in Key Vault. Must match GITHUB_APP_ID in bootstrap_agent.sh / entrypoint.sh."
+  type        = string
+  default     = ""
+}
+
+variable "github_webhook_secret" {
+  description = "Shared secret for the GitHub `workflow_job` webhook that feeds the queue-metric Function. Set the same value on the GitHub webhook. Leave empty to run the Function in timer-only mode (the webhook endpoint then rejects every call)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 #########################################################################
 # Monitoring - Azure Monitor Agent (AMA), vmss backend only
 #########################################################################

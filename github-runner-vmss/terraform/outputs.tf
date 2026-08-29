@@ -43,6 +43,16 @@ output "vmss_data_collection_rule_id" {
   description = "The DCR bound to the scale set. Query bootstrap output in the workspace with: Syslog | where Facility == \"local0\""
 }
 
+output "queue_metric_function_name" {
+  value       = local.queue_fn_enabled ? azurerm_linux_function_app.queue_fn[0].name : null
+  description = "Deploy target for .github/workflows/deploy-queue-metric-function.yml."
+}
+
+output "queue_metric_function_webhook_url" {
+  value       = local.queue_fn_enabled ? "https://${azurerm_linux_function_app.queue_fn[0].default_hostname}/api/workflow-job-webhook" : null
+  description = "GitHub webhook Payload URL - append ?code=<function key> (Function App -> Functions -> workflowJobWebhook -> Function Keys, or `az functionapp function keys list`)."
+}
+
 #########################
 # ACI backend outputs
 #########################

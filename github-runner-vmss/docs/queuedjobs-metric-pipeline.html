@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>:root{color-scheme:light dark}html,body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>QueuedJobs Metric Pipeline</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground:      #f6f7f9;
+    --surface:     #ffffff;
+    --surface-2:   #eef1f4;
+    --ink:         #1a2230;
+    --ink-soft:    #58616f;
+    --line:        #d7dce3;
+    --line-strong: #b8c0cb;
+    --accent:      #1f6f8b;
+    --accent-soft: #e4eef1;
+    --warn:        #8a5d18;
+    --warn-soft:   #f3ebdc;
+    --shadow:      0 1px 2px rgba(20,30,45,.05), 0 8px 24px rgba(20,30,45,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #10141b;
+      --surface:     #161c25;
+      --surface-2:   #1e2530;
+      --ink:         #e7ebf1;
+      --ink-soft:    #99a3b2;
+      --line:        #2a323e;
+      --line-strong: #3a4453;
+      --accent:      #55b6d1;
+      --accent-soft: #14313a;
+      --warn:        #d6a24f;
+      --warn-soft:   #2c2413;
+      --shadow:      0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:      #10141b;
+    --surface:     #161c25;
+    --surface-2:   #1e2530;
+    --ink:         #e7ebf1;
+    --ink-soft:    #99a3b2;
+    --line:        #2a323e;
+    --line-strong: #3a4453;
+    --accent:      #55b6d1;
+    --accent-soft: #14313a;
+    --warn:        #d6a24f;
+    --warn-soft:   #2c2413;
+    --shadow:      0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 72px 28px 112px;
+  }
+  .measure { max-width: 680px; }
+
+  .eyebrow {
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 12px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 14px;
+  }
+  h1 {
+    font-weight: 600;
+    font-size: clamp(1.9rem, 1.3rem + 2.4vw, 2.9rem);
+    line-height: 1.12;
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+    margin: 0 0 18px;
+  }
+  .standfirst {
+    font-size: 1.12rem;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  h2 {
+    font-weight: 600;
+    font-size: 1.32rem;
+    letter-spacing: -0.01em;
+    margin: 64px 0 4px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+  }
+  h2 + .sub {
+    color: var(--ink-soft);
+    margin: 0 0 26px;
+  }
+  h3 {
+    font-weight: 600;
+    font-size: 1rem;
+    margin: 32px 0 8px;
+  }
+  p { margin: 0 0 16px; }
+  a { color: var(--accent); text-underline-offset: 2px; }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.86em;
+  }
+  p code, li code, td code {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0.08em 0.36em;
+    white-space: nowrap;
+  }
+
+  .callout {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 18px;
+    align-items: start;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 10px;
+    padding: 22px 24px;
+    margin: 38px 0 8px;
+    box-shadow: var(--shadow);
+  }
+  .callout .tag {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 999px;
+    padding: 5px 11px;
+    white-space: nowrap;
+    margin-top: 3px;
+  }
+  .callout p { margin: 0; }
+  .callout p + p { margin-top: 10px; }
+
+  figure {
+    margin: 40px 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 26px 22px 20px;
+    box-shadow: var(--shadow);
+  }
+  .figscroll { overflow-x: auto; }
+  figure svg {
+    display: block;
+    width: 100%;
+    min-width: 620px;
+    height: auto;
+    color: var(--ink);
+  }
+  figcaption {
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    margin: 4px 0 22px;
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .swatch { width: 22px; height: 0; border-top: 2px solid var(--ink-soft); }
+  .swatch.accent { border-top-color: var(--accent); }
+  .swatch.dashed { border-top-style: dashed; }
+
+  .tablescroll { overflow-x: auto; margin: 26px 0 8px; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 560px;
+    font-size: 0.92rem;
+  }
+  caption { text-align: left; color: var(--ink-soft); font-size: 0.86rem; margin-bottom: 10px; }
+  th, td {
+    text-align: left;
+    vertical-align: top;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  thead th {
+    font-family: "IBM Plex Mono", ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    border-bottom: 1px solid var(--line-strong);
+  }
+  tbody th {
+    font-weight: 500;
+    color: var(--ink-soft);
+    width: 30%;
+  }
+  tbody tr:last-child td, tbody tr:last-child th { border-bottom: none; }
+  .yes { color: var(--accent); font-weight: 600; }
+  .no  { color: var(--warn); font-weight: 600; }
+
+  ul { margin: 0 0 16px; padding-left: 1.15em; }
+  li { margin: 0 0 10px; }
+  li::marker { color: var(--line-strong); }
+
+  .note {
+    font-size: 0.9rem;
+    color: var(--ink-soft);
+    background: var(--warn-soft);
+    border: 1px solid color-mix(in srgb, var(--warn) 30%, transparent);
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 22px 0;
+  }
+  .note b { color: var(--ink); }
+
+  pre {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    box-shadow: var(--shadow);
+    margin: 14px 0 22px;
+  }
+  pre code {
+    font-size: 0.82rem;
+    line-height: 1.7;
+    color: var(--ink);
+    white-space: pre;
+  }
+  .cmt { color: var(--ink-soft); }
+
+  .foot {
+    margin-top: 72px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    font-size: 0.82rem;
+    color: var(--ink-soft);
+  }
+
+  @media (max-width: 560px) {
+    .wrap { padding: 48px 18px 80px; }
+    .callout { grid-template-columns: 1fr; gap: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="eyebrow">Azure Monitor &middot; runner autoscale</p>
+  <h1>How <span class="mono">QueuedJobs</span> becomes an autoscale signal</h1>
+  <p class="standfirst measure">The GitHub queued-run count is polled by a workflow, POSTed to Azure Monitor as a
+  custom metric on the VMSS resource, and read by the autoscale rule. It is a time series, not a log &mdash;
+  it never touches the Log Analytics workspace.</p>
+
+  <div class="callout">
+    <span class="tag">Short answer</span>
+    <div>
+      <p><b>No &mdash; it is not a table in Log Analytics.</b> <code>QueuedJobs</code> lives in
+      <b>Azure Monitor Metrics</b>: a numeric time-series store attached directly to the VMSS resource,
+      under the namespace <code>GitHubActionsQueue</code>. Metrics and Logs are two separate data planes.</p>
+      <p>The Log Analytics workspace in this project holds something else entirely &mdash; the runner
+      instances&rsquo; <code>Syslog</code> and <code>Perf</code>, shipped by the Azure Monitor Agent.
+      Autoscale never queries it.</p>
+    </div>
+  </div>
+
+  <h2>The pipeline</h2>
+  <p class="sub">From a GitHub API call to a VMSS capacity change &mdash; and where it deliberately does not go.</p>
+
+  <div class="legend">
+    <span><span class="swatch accent"></span> path the autoscale rule actually uses</span>
+    <span><span class="swatch dashed"></span> separate store &mdash; not consulted for scaling</span>
+  </div>
+
+  <figure>
+    <div class="figscroll">
+      <svg viewBox="0 0 960 486" role="img" aria-label="Flow: the poll-queue-depth workflow reads the queued workflow-run count from the GitHub Actions API, POSTs it as the QueuedJobs custom metric to the Azure Monitor Metrics store scoped to the VMSS, where the autoscale setting reads it every minute and changes VMSS capacity by one. In parallel and unconnected, the VMSS instances send Syslog and Perf through a Data Collection Rule into a Log Analytics workspace, which autoscale never reads.">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="currentColor"></path>
+          </marker>
+          <marker id="ah-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"></path>
+          </marker>
+        </defs>
+
+        <!-- ===== METRICS LANE ===== -->
+        <text x="16" y="30" font-family="'IBM Plex Mono', monospace" font-size="11" letter-spacing="1.5" fill="var(--accent)">METRICS  &#183;  drives autoscale</text>
+
+        <!-- Box A: GitHub API -->
+        <rect x="16" y="46" width="182" height="92" rx="7" fill="var(--surface)" stroke="currentColor" stroke-opacity="0.45"></rect>
+        <text x="107" y="80" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">GitHub Actions API</text>
+        <text x="107" y="100" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">list workflow runs,</text>
+        <text x="107" y="115" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">status = queued</text>
+
+        <!-- A -> B -->
+        <line x1="198" y1="92" x2="286" y2="92" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></line>
+        <text x="242" y="82" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.75">total_count</text>
+
+        <!-- Box B: poll workflow -->
+        <rect x="288" y="46" width="196" height="92" rx="7" fill="var(--surface)" stroke="currentColor" stroke-opacity="0.45"></rect>
+        <text x="386" y="76" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">poll-queue-depth.yml</text>
+        <text x="386" y="96" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">cron &asymp; every 5 min</text>
+        <text x="386" y="111" text-anchor="middle" font-size="11" fill="currentColor" opacity="0.7">GitHub-hosted runner</text>
+
+        <!-- B -> C (accent) -->
+        <line x1="484" y1="92" x2="574" y2="92" stroke="var(--accent)" stroke-width="2" marker-end="url(#ah-accent)"></line>
+        <text x="529" y="80" text-anchor="middle" font-size="10.5" fill="var(--accent)">POST metric</text>
+        <text x="529" y="112" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.6">poller SP &rarr;</text>
+        <text x="529" y="124" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.6">Metrics Publisher</text>
+
+        <!-- Box C: Azure Monitor Metrics (accent) -->
+        <rect x="576" y="42" width="210" height="100" rx="7" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"></rect>
+        <text x="681" y="70" text-anchor="middle" font-size="13" font-weight="700" fill="currentColor">Azure Monitor &mdash; Metrics</text>
+        <text x="681" y="90" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.82">time-series DB, scoped to the VMSS</text>
+        <text x="681" y="106" text-anchor="middle" font-size="10.5" font-family="'IBM Plex Mono', monospace" fill="currentColor" opacity="0.82">ns: GitHubActionsQueue</text>
+        <text x="681" y="121" text-anchor="middle" font-size="10.5" font-family="'IBM Plex Mono', monospace" fill="currentColor" opacity="0.82">metric: QueuedJobs</text>
+
+        <!-- C -> D (accent, down + right) -->
+        <path d="M681,142 L681,176 L788,176" fill="none" stroke="var(--accent)" stroke-width="2" marker-end="url(#ah-accent)"></path>
+        <text x="681" y="163" text-anchor="middle" font-size="10.5" fill="var(--accent)">autoscale reads &#183; 1-min grain</text>
+
+        <!-- Box D: Autoscale setting (accent) -->
+        <rect x="790" y="150" width="154" height="86" rx="7" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"></rect>
+        <text x="867" y="178" text-anchor="middle" font-size="12.5" font-weight="700" fill="currentColor">Autoscale rule</text>
+        <text x="867" y="197" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.82">out &ge; 1  &#183;  in &lt; 1</text>
+        <text x="867" y="212" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.82">&divide; instance count</text>
+
+        <!-- D -> E -->
+        <path d="M867,236 L867,262 L560,262 L560,286" fill="none" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"></path>
+        <text x="713" y="255" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.75">ChangeCount &plusmn;1</text>
+
+        <!-- Box E: VMSS capacity -->
+        <rect x="446" y="288" width="228" height="70" rx="7" fill="var(--surface)" stroke="currentColor" stroke-opacity="0.55"></rect>
+        <text x="560" y="318" text-anchor="middle" font-size="13" font-weight="600" fill="currentColor">VMSS capacity</text>
+        <text x="560" y="337" text-anchor="middle" font-size="10.5" fill="currentColor" opacity="0.7">instances added / removed</text>
+
+        <!-- divider -->
+        <line x1="16" y1="392" x2="944" y2="392" stroke="currentColor" stroke-opacity="0.25" stroke-dasharray="2 4"></line>
+        <text x="480" y="386" text-anchor="middle" font-size="10.5" font-style="italic" fill="currentColor" opacity="0.6">different Azure Monitor data plane &mdash; autoscale never reads it</text>
+
+        <!-- ===== LOGS LANE ===== -->
+        <text x="16" y="420" font-family="'IBM Plex Mono', monospace" font-size="11" letter-spacing="1.5" fill="currentColor" opacity="0.55">LOGS  &#183;  observability only</text>
+
+        <!-- Box F: VMSS instances -->
+        <rect x="16" y="430" width="182" height="48" rx="7" fill="var(--surface-2)" stroke="currentColor" stroke-opacity="0.35"></rect>
+        <text x="107" y="452" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor" opacity="0.85">VMSS instances</text>
+        <text x="107" y="468" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">same scale set as above</text>
+
+        <line x1="198" y1="454" x2="286" y2="454" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.6" marker-end="url(#ah)"></line>
+        <text x="242" y="446" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">AMA agent</text>
+
+        <!-- Box G: DCR -->
+        <rect x="288" y="430" width="196" height="48" rx="7" fill="var(--surface-2)" stroke="currentColor" stroke-opacity="0.35"></rect>
+        <text x="386" y="452" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor" opacity="0.85">Data Collection Rule</text>
+        <text x="386" y="468" text-anchor="middle" font-size="10" fill="currentColor" opacity="0.6">routes streams</text>
+
+        <line x1="484" y1="454" x2="574" y2="454" stroke="currentColor" stroke-width="1.5" stroke-opacity="0.6" marker-end="url(#ah)"></line>
+        <text x="529" y="446" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.6">Syslog / Perf</text>
+
+        <!-- Box H: Log Analytics -->
+        <rect x="576" y="424" width="290" height="60" rx="7" fill="var(--surface-2)" stroke="currentColor" stroke-opacity="0.35"></rect>
+        <text x="721" y="447" text-anchor="middle" font-size="12" font-weight="600" fill="currentColor" opacity="0.85">Log Analytics workspace</text>
+        <text x="721" y="464" text-anchor="middle" font-size="10" font-family="'IBM Plex Mono', monospace" fill="currentColor" opacity="0.62">tables: Syslog, Perf, AzureMetrics</text>
+        <text x="721" y="477" text-anchor="middle" font-size="9.5" fill="currentColor" opacity="0.55">queried with KQL</text>
+      </svg>
+    </div>
+    <figcaption>The queued-run count travels <b>GitHub API &rarr; poll workflow &rarr; Metrics store &rarr; autoscale rule &rarr; VMSS capacity</b>.
+    The <span style="color:var(--accent);font-weight:600">highlighted</span> hops are the only ones the autoscale engine
+    touches. The lower lane &mdash; the same instances shipping logs to a workspace &mdash; runs on a different Azure Monitor
+    subsystem and is invisible to scaling decisions.</figcaption>
+  </figure>
+
+  <h2>Two data planes, one product name</h2>
+  <p class="sub">&ldquo;Azure Monitor&rdquo; covers both, but Metrics and Logs are stored, priced, and queried separately.</p>
+
+  <div class="tablescroll">
+    <table>
+      <caption>Where each signal in this project lives</caption>
+      <thead>
+        <tr>
+          <th scope="col"></th>
+          <th scope="col">Azure Monitor Metrics</th>
+          <th scope="col">Log Analytics (Logs)</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Store</th>
+          <td>Time-series DB, one per Azure resource</td>
+          <td>Kusto columnar store, one per workspace</td>
+        </tr>
+        <tr>
+          <th scope="row">Shape</th>
+          <td>Numeric series: name, namespace, dimensions, aggregates</td>
+          <td>Structured rows in named tables</td>
+        </tr>
+        <tr>
+          <th scope="row">Granularity &amp; retention</th>
+          <td>1-minute, ~93 days, fixed</td>
+          <td>Per event, 30 days&ndash;years, configurable</td>
+        </tr>
+        <tr>
+          <th scope="row">How you read it</th>
+          <td>Metrics Explorer, Metrics REST API, <code>az monitor metrics list</code></td>
+          <td>Logs blade (KQL), <code>az monitor log-analytics query</code></td>
+        </tr>
+        <tr>
+          <th scope="row">How data gets in here</th>
+          <td>REST <code>POST</code> to <code>&lt;region&gt;.monitoring.azure.com</code>, or platform emission</td>
+          <td>Data Collection Rule + agent, diagnostic settings, ingestion API</td>
+        </tr>
+        <tr>
+          <th scope="row">Read by VMSS autoscale?</th>
+          <td class="yes">Yes &mdash; the only source it can use</td>
+          <td class="no">No &mdash; never queried</td>
+        </tr>
+        <tr>
+          <th scope="row">In this project</th>
+          <td><code>QueuedJobs</code> in <code>GitHubActionsQueue</code>, posted by <code>poll-queue-depth.yml</code></td>
+          <td>Runner <code>Syslog</code> (bootstrap logs on facility <code>local0</code>) and <code>Perf</code>, via AMA</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <b>The one bridge that looks like it should apply, but doesn&rsquo;t.</b> A diagnostic setting can copy a
+    resource&rsquo;s <em>platform</em> metrics into the workspace&rsquo;s <code>AzureMetrics</code> table. It does
+    <em>not</em> pick up custom metrics you POST yourself, and autoscale reads the Metrics store directly
+    regardless &mdash; so wiring one up would not put <code>QueuedJobs</code> in Log Analytics, and would not
+    change scaling behaviour either way.
+  </div>
+
+  <h2>Why the split matters here</h2>
+  <ul>
+    <li><b>Staleness stops scale-out, silently.</b> If <code>poll-queue-depth.yml</code> misses its window
+    (GitHub&rsquo;s <code>schedule</code> is best-effort), no fresh <code>QueuedJobs</code> point lands. The
+    autoscale rule then has nothing above threshold to act on, so a queued job waits &mdash; there is no
+    fallback to &ldquo;check the logs&rdquo;.</li>
+    <li><b>You debug scaling in two different places.</b> <em>Did the metric arrive?</em> &rarr; Metrics
+    Explorer / <code>az monitor metrics list</code>. <em>Did autoscale act on it?</em> &rarr; the scale
+    set&rsquo;s <b>Scaling &rarr; Run history</b>. <em>Did the runner bootstrap?</em> &rarr; Log Analytics
+    <code>Syslog</code>. Three tools, one pipeline.</li>
+    <li><b>Wanting the count in KQL means shipping it twice.</b> To trend <code>QueuedJobs</code> alongside
+    the runner logs you would send it to a custom workspace table as a second, independent ingestion. It
+    will never appear in Log Analytics as a side effect of the metric POST.</li>
+  </ul>
+
+  <h3>Checking each leg</h3>
+<pre><code><span class="cmt"># 1. did the metric land? (Azure Monitor Metrics)</span>
+az monitor metrics list \
+  --resource "$VMSS_RESOURCE_ID" \
+  --namespace GitHubActionsQueue --metric QueuedJobs \
+  --query "value[].timeseries[].data[-1]"
+
+<span class="cmt"># 2. did autoscale act? — portal: VMSS &rarr; Scaling &rarr; Run history</span>
+
+<span class="cmt"># 3. did the runner bootstrap? (Log Analytics — different store, KQL)</span>
+Syslog | where Facility == "local0" | order by TimeGenerated asc</code></pre>
+
+  <p class="foot">Reference for the <span class="mono">github-runner-vmss</span> project &mdash; VMSS backend,
+  custom-metric autoscale path. Metric names must match <span class="mono">custom_metric_name</span> /
+  <span class="mono">custom_metric_namespace</span> in <span class="mono">terraform.tfvars</span>.</p>
+</div>
+
+</body>
+</html>

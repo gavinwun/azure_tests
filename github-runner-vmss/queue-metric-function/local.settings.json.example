@@ -1,0 +1,23 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+
+    "GITHUB_APP_ID": "4736345",
+    "KEY_VAULT_URI": "https://kv-ghrunner-25818.vault.azure.net/",
+    "GITHUB_APP_KEY_SECRET_NAME": "github-app-private-key",
+
+    "RUNNER_SCOPE": "repo",
+    "GITHUB_OWNER": "gavinwun",
+    "GITHUB_REPO": "gavinwun/azure_tests",
+    "RUNNER_MATCH_LABELS": "self-hosted,vmss",
+
+    "VMSS_RESOURCE_ID": "/subscriptions/xxxx/resourceGroups/rg-mgmt-devops/providers/Microsoft.Compute/virtualMachineScaleSets/vmss-ghrunner-production-xxxx",
+    "VMSS_REGION": "australiaeast",
+    "METRIC_NAMESPACE": "GitHubActionsQueue",
+    "METRIC_NAME": "QueuedJobs",
+
+    "GITHUB_WEBHOOK_SECRET": "set-a-long-random-string-and-use-the-same-in-the-github-webhook"
+  }
+}
