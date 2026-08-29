@@ -61,6 +61,18 @@ log_analytics_workspace_id = ""
 # post-apply az step. Get it: az ad sp show --id <poller-client-id> --query id -o tsv
 queue_poller_principal_id = "b01481e4-2d39-4ffc-a7ff-6f17a82814bf"
 
+# Which queued jobs count toward autoscale: a job counts only if its runs-on
+# labels are a superset of these. "self-hosted,vmss" = VMSS-specific.
+runner_match_labels = "self-hosted"
+
+# Queue-metric Function App (queue-metric-function.tf) - an alternative to the
+# poll-queue-depth.yml cron that doesn't depend on GitHub's scheduler. Off by
+# default. When true, also set github_app_id, and github_webhook_secret if you
+# want the workflow_job webhook (else it runs timer-only).
+enable_queue_metric_function = true
+github_app_id                = "4736345"
+# github_webhook_secret       = ""   # sensitive - prefer setting in the portal / a *.local.tfvars
+
 tags = {
   costCentre = "platform-engineering"
 }
