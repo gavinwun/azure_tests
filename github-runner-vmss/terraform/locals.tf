@@ -44,7 +44,9 @@ locals {
     set -euo pipefail
 
     mkdir -p /var/log/bootstrap
-    exec >> /var/log/bootstrap/bootstrap-download.log 2>&1
+    # tee (not plain redirect) so the CustomScript extension status still
+    # captures this - visible in `az vmss get-instance-view`.
+    exec > >(tee -a /var/log/bootstrap/bootstrap-download.log) 2>&1
     echo "=== CustomScript preamble $(date -u) ==="
 
     # Run-once guard. CustomScript re-executes on every instance model
@@ -83,7 +85,20 @@ locals {
     fi
 
     chmod +x /var/log/bootstrap/bootstrap_agent.sh
-    /var/log/bootstrap/bootstrap_agent.sh > /var/log/bootstrap/bootstrap.log 2>&1
+
+    # Run it. bootstrap_agent.sh fans its own output out to a detail log +
+    # syslog + stdout, so this both lands in bootstrap.log and flows up to
+    # the extension status. On failure, surface the tail so the error is
+    # visible without a run-command round-trip.
+    set +e
+    /var/log/bootstrap/bootstrap_agent.sh 2>&1 | tee /var/log/bootstrap/bootstrap.log
+    rc=$${PIPESTATUS[0]}
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      echo "bootstrap_agent.sh exited $rc - last 60 lines:" >&2
+      tail -n 60 /var/log/bootstrap/bootstrap_agent_detail.log 2>/dev/null >&2 || true
+      exit "$rc"
+    fi
   EOT
 
   bootstrap_command = "echo ${base64encode(local.bootstrap_preamble_script)} | base64 -d | bash"

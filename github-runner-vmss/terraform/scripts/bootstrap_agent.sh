@@ -8,11 +8,14 @@
 #   2. Registers + runs this instance as an EPHEMERAL GitHub Actions runner
 #      (auto-deregisters after one job - VMSS scale-in reclaims the instance)
 set -euo pipefail
-# Mirror all output to a local file AND to syslog (facility local0, tag
-# ghrunner-bootstrap). Azure Monitor Agent's Data Collection Rule picks up
-# local0 and ships it to Log Analytics, so a failed bootstrap is visible
-# there without SSHing to the instance. See terraform/monitoring.tf.
-exec > >(tee -a /var/log/bootstrap/bootstrap_agent_detail.log | logger -t ghrunner-bootstrap -p local0.info) 2>&1
+# Mirror all output three ways: a local file, syslog (facility local0, tag
+# ghrunner-bootstrap - AMA's Data Collection Rule ships local0 to Log
+# Analytics, see terraform/monitoring.tf), and the original stdout, so the
+# CustomScript extension status also captures it (visible in
+# `az vmss get-instance-view`).
+mkdir -p /var/log/bootstrap
+exec > >(tee -a /var/log/bootstrap/bootstrap_agent_detail.log \
+              >(logger -t ghrunner-bootstrap -p local0.info)) 2>&1
 
 # ---------------------------------------------------------------------
 # Run-once guard
@@ -70,21 +73,51 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 # ---------------------------------------------------------------------
-# 1. Base packages
+# apt hardening
+#
+# On a fresh VMSS instance, cloud-init and the apt-daily / unattended-
+# upgrades systemd units grab the dpkg lock the moment the box boots, so
+# the first apt-get here dies with exit 100. Wait cloud-init out, stop
+# the background apt units, then give every apt-get a long lock timeout
+# and a few retries for transient mirror errors.
 # ---------------------------------------------------------------------
-apt-get update
-apt-get install -y \
+cloud-init status --wait 2>/dev/null || true
+systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
+systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
+apt_get() {
+  local i
+  for i in 1 2 3 4 5; do
+    if apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=3 "$@"; then
+      return 0
+    fi
+    echo "apt-get $* failed (attempt ${i}/5) - retrying in 15s"
+    sleep 15
+  done
+  echo "apt-get $* still failing after 5 attempts" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------
+# 1. Base packages (required - runner won't configure without these)
+# ---------------------------------------------------------------------
+apt_get update
+apt_get install -y \
   curl jq zip unzip ca-certificates apt-transport-https gnupg \
   lsb-release git build-essential libicu-dev
 
 # ---------------------------------------------------------------------
-# 2. Node.js (NodeSource LTS)
+# 2. Node.js (NodeSource LTS) - required by the Actions runner
 # ---------------------------------------------------------------------
-curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
-apt-get install -y nodejs
+for i in 1 2 3; do
+  curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && break
+  echo "NodeSource setup failed (attempt ${i}/3) - retrying in 10s"; sleep 10
+done
+apt_get install -y nodejs
 
 # ---------------------------------------------------------------------
-# 3. Azure CLI (Microsoft apt repo)
+# 3. Azure CLI (Microsoft apt repo) - best-effort, workflows use it but
+#    the runner comes online without it.
 # ---------------------------------------------------------------------
 curl -sL https://packages.microsoft.com/keys/microsoft.asc \
   | gpg --dearmor | tee /etc/apt/trusted.gpg.d/microsoft.gpg > /dev/null
@@ -93,26 +126,36 @@ AZ_REPO=$(lsb_release -cs)
 echo "deb [arch=amd64] https://packages.microsoft.com/repos/azure-cli/ ${AZ_REPO} main" \
   | tee /etc/apt/sources.list.d/azure-cli.list
 
-apt-get update
-apt-get install -y azure-cli
+apt_get update
+apt_get install -y azure-cli || echo "WARN: azure-cli install failed - continuing"
 
 # ---------------------------------------------------------------------
-# 4. .NET SDK (Microsoft apt repo)
+# 4. .NET SDK (Microsoft apt repo) - best-effort. A dotnet-sdk-<channel>
+#    that isn't published for this Ubuntu release must not abort the whole
+#    bootstrap; fall back to the current LTS, then give up gracefully.
 # ---------------------------------------------------------------------
 UBUNTU_VER=$(lsb_release -rs)
-wget "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VER}/packages-microsoft-prod.deb" \
-  -O /tmp/packages-microsoft-prod.deb
-dpkg -i /tmp/packages-microsoft-prod.deb
-rm /tmp/packages-microsoft-prod.deb
-
-apt-get update
-apt-get install -y "dotnet-sdk-${DOTNET_CHANNEL}"
+if wget -q "https://packages.microsoft.com/config/ubuntu/${UBUNTU_VER}/packages-microsoft-prod.deb" \
+     -O /tmp/packages-microsoft-prod.deb; then
+  dpkg -i /tmp/packages-microsoft-prod.deb || true
+  rm -f /tmp/packages-microsoft-prod.deb
+  apt_get update
+  if ! apt_get install -y "dotnet-sdk-${DOTNET_CHANNEL}"; then
+    echo "WARN: dotnet-sdk-${DOTNET_CHANNEL} unavailable - falling back to dotnet-sdk-8.0"
+    apt_get install -y dotnet-sdk-8.0 || echo "WARN: .NET SDK install failed - continuing without it"
+  fi
+else
+  echo "WARN: could not fetch packages-microsoft-prod.deb - skipping .NET SDK"
+fi
 
 # ---------------------------------------------------------------------
-# 5. Docker (skip if workflows don't need docker-in-docker on the runner)
+# 5. Docker - best-effort (only needed for docker-in-docker workflows)
 # ---------------------------------------------------------------------
-apt-get install -y docker.io
-systemctl enable --now docker
+if apt_get install -y docker.io; then
+  systemctl enable --now docker || true
+else
+  echo "WARN: docker.io install failed - continuing without docker"
+fi
 
 # ---------------------------------------------------------------------
 # 6. GitHub Actions runner - download, register, run (ephemeral)

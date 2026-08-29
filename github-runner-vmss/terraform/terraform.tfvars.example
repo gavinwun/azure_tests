@@ -7,6 +7,16 @@ vnet_name                 = "vnet-hub"
 devopsagent_subnet_name   = "snet-devopsagent"
 pep_subnet_name           = "snet-pep"
 
+# false (default): the names above point at an existing landing-zone
+# network. true: vnet_resource_group_name must already exist (with the
+# deploy identity holding Contributor on it); Terraform then creates the
+# VNet/subnets/DNS zone inside it using the names above. Terraform never
+# creates or owns the resource group. See README's manage_network note.
+manage_network = false
+# vnet_address_space                = ["10.0.0.0/16"]
+# devopsagent_subnet_address_prefix = "10.0.1.0/24"
+# pep_subnet_address_prefix         = "10.0.2.0/24"
+
 blob_private_dns_zone_name                 = "privatelink.blob.core.windows.net"
 blob_private_dns_zone_resource_group_name  = "rg-network-hub"
 
@@ -19,6 +29,12 @@ admin_username = "azureuser"
 
 github_org  = "your-org"
 environment = "dev"
+
+# "org" (default): runners register org-wide. "repo": single repo, for a
+# personal account - set github_repo and keep in sync with GITHUB_SCOPE in
+# bootstrap_agent.sh / entrypoint.sh and the RUNNER_SCOPE repo var.
+github_runner_scope = "org"
+github_repo         = ""   # "owner/repo", required when github_runner_scope = "repo"
 
 # "vmss" (default) or "aci" - see README for the full switch-over
 # procedure before changing this on a live deployment.
