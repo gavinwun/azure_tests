@@ -65,7 +65,7 @@ resource "azurerm_storage_blob" "bootstrap_script" {
   count = var.compute_backend == "vmss" ? 1 : 0
 
   name                 = "bootstrap_agent.sh"
-  storage_container_id = azurerm_storage_account.bootstrap.id
+  storage_container_id = azurerm_storage_account.bootstrap[0].id
   type                 = "Block"
   source               = "${path.module}/scripts/bootstrap_agent.sh"
 
