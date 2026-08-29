@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # --- Base packages + tooling (mirrors bootstrap_agent.sh sections 1-5) ---
 RUN apt-get update && apt-get install -y \
-      curl jq zip unzip ca-certificates apt-transport-https gnupg \
+      curl jq zip unzip ca-certificates apt-transport-https gnupg openssl \
       lsb-release git build-essential libicu-dev sudo \
     && rm -rf /var/lib/apt/lists/*
 

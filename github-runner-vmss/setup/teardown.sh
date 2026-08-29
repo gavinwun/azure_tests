@@ -88,7 +88,7 @@ cat <<EOF
 
   Subscription     : $SUBSCRIPTION_ID
   App registrations: ${APP_NAMES[*]}
-  Key Vault secrets: github-app-token, vmss-ssh-public-key, vmss-ssh-private-key  (vault: $KV_NAME)
+  Key Vault secrets: github-app-token, github-app-private-key, vmss-ssh-public-key, vmss-ssh-private-key  (vault: $KV_NAME)
   --delete-state   : $DELETE_STATE   -> storage account ${TFSTATE_ACCOUNT:-'(not recorded)'} (RG $TFSTATE_RG)
   --delete-keyvault: $DELETE_KEYVAULT   -> delete + purge $KV_NAME
   --delete-groups  : $DELETE_GROUPS   -> ${CREATED_HUB_RG:-'(no bootstrap-created groups recorded)'}
@@ -122,7 +122,7 @@ done
 # ---------------------------------------------------------------------------
 step "Key Vault secrets"
 if [[ -n "$KV_NAME" ]] && az keyvault show --name "$KV_NAME" >/dev/null 2>&1; then
-  for s in github-app-token vmss-ssh-public-key vmss-ssh-private-key; do
+  for s in github-app-token github-app-private-key vmss-ssh-public-key vmss-ssh-private-key; do
     if az keyvault secret show --vault-name "$KV_NAME" --name "$s" >/dev/null 2>&1; then
       run az keyvault secret delete --vault-name "$KV_NAME" --name "$s" -o none && ok "deleted secret: $s"
     else

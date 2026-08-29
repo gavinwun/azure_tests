@@ -9,7 +9,12 @@ set -euo pipefail
 
 : "${GITHUB_SCOPE:=org}"                    # "org" or "repo"
 : "${KEYVAULT_NAME:?KEYVAULT_NAME env var required}"
-: "${KEYVAULT_SECRET_NAME:=github-app-token}"
+# This container mints its own GitHub App installation token from the App
+# private key in Key Vault (secret KEYVAULT_APP_KEY_SECRET_NAME) - no
+# pre-stored short-lived token. reconcile-aci-runners.yml must pass
+# GITHUB_APP_ID via --environment-variables.
+: "${GITHUB_APP_ID:?GITHUB_APP_ID env var required (numeric GitHub App ID)}"
+: "${KEYVAULT_APP_KEY_SECRET_NAME:=github-app-private-key}"
 
 # Scope -> REST base + attach URL. "org" needs GITHUB_ORG; "repo" needs
 # GITHUB_REPO ("owner/repo") - use "repo" for a personal account.
@@ -28,22 +33,41 @@ RUNNER_GROUP="default"
 
 cd /opt/actions-runner
 
-# --- Fetch GitHub App token from Key Vault via this container's
-#     user-assigned managed identity (--assign-identity in
-#     reconcile-aci-runners.yml). Same IMDS pattern as the VMSS side. ---
-KV_TOKEN=$(curl -s -H "Metadata:true" \
+# --- Mint a GitHub App installation token on the box, from the App
+#     private key in Key Vault, via this container's user-assigned managed
+#     identity (--assign-identity in reconcile-aci-runners.yml). Same
+#     approach as the VMSS side's mint-gh-token.sh. ---
+fail() { echo "entrypoint: $*" >&2; exit 1; }
+
+KV_TOKEN=$(curl -s --retry 5 --retry-delay 3 --retry-connrefused -H "Metadata:true" \
   "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" \
-  | jq -r '.access_token')
+  | jq -r '.access_token // empty')
+[[ -n "${KV_TOKEN}" ]] || fail "no AAD token from IMDS - is a managed identity assigned to this container group?"
 
-GITHUB_TOKEN=$(curl -s \
+APP_PEM=$(curl -s --retry 5 --retry-delay 3 \
   -H "Authorization: Bearer ${KV_TOKEN}" \
-  "https://${KEYVAULT_NAME}.vault.azure.net/secrets/${KEYVAULT_SECRET_NAME}?api-version=7.4" \
-  | jq -r '.value')
+  "https://${KEYVAULT_NAME}.vault.azure.net/secrets/${KEYVAULT_APP_KEY_SECRET_NAME}?api-version=7.4" \
+  | jq -r '.value // empty')
+[[ -n "${APP_PEM}" ]] || fail "Key Vault secret '${KEYVAULT_APP_KEY_SECRET_NAME}' missing/empty in ${KEYVAULT_NAME}"
 
-if [[ -z "${GITHUB_TOKEN}" || "${GITHUB_TOKEN}" == "null" ]]; then
-  echo "Failed to fetch GitHub App token from Key Vault" >&2
-  exit 1
-fi
+_kf=$(mktemp); chmod 600 "${_kf}"; printf '%s\n' "${APP_PEM}" > "${_kf}"; unset APP_PEM
+_b64u() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+_now=$(date -u +%s)
+_hdr=$(printf '{"alg":"RS256","typ":"JWT"}' | _b64u)
+_pl=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((_now-60))" "$((_now+540))" "${GITHUB_APP_ID}" | _b64u)
+_sig=$(printf '%s.%s' "${_hdr}" "${_pl}" | openssl dgst -sha256 -sign "${_kf}" -binary 2>/dev/null | _b64u)
+shred -u "${_kf}" 2>/dev/null || rm -f "${_kf}"
+[[ -n "${_sig}" ]] || fail "could not sign App JWT - '${KEYVAULT_APP_KEY_SECRET_NAME}' is not a valid RSA private key PEM"
+APP_JWT="${_hdr}.${_pl}.${_sig}"
+
+INSTALL_ID=$(curl -s -H "Authorization: Bearer ${APP_JWT}" -H "Accept: application/vnd.github+json" \
+  "${GH_API_BASE}/installation" | jq -r '.id // empty')
+[[ -n "${INSTALL_ID}" ]] || fail "no installation for ${GH_API_BASE} (App not installed, wrong GITHUB_APP_ID=${GITHUB_APP_ID}, or stale key)"
+
+GITHUB_TOKEN=$(curl -s -X POST -H "Authorization: Bearer ${APP_JWT}" -H "Accept: application/vnd.github+json" \
+  "https://api.github.com/app/installations/${INSTALL_ID}/access_tokens" | jq -r '.token // empty')
+unset APP_JWT
+[[ -n "${GITHUB_TOKEN}" ]] || fail "installation token exchange failed for installation ${INSTALL_ID}"
 
 # --- Exchange for a short-lived runner REGISTRATION token ---
 REG_TOKEN=$(curl -s -X POST \

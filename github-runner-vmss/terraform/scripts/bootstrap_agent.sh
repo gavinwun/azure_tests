@@ -5,8 +5,10 @@
 #
 # Does two things in one pass, matching the original script's shape:
 #   1. Installs the tooling this org's pipelines need
-#   2. Registers + runs this instance as an EPHEMERAL GitHub Actions runner
-#      (auto-deregisters after one job - VMSS scale-in reclaims the instance)
+#   2. Registers + runs this instance as a PERSISTENT GitHub Actions runner
+#      (takes job after job; terminate-watcher.sh deregisters it gracefully
+#      when VMSS scale-in reclaims the instance). The ACI backend uses
+#      --ephemeral instead - one container per job - see docker/entrypoint.sh.
 set -euo pipefail
 # Mirror all output three ways: a local file, syslog (facility local0, tag
 # ghrunner-bootstrap - AMA's Data Collection Rule ships local0 to Log
@@ -22,11 +24,10 @@ exec > >(tee -a /var/log/bootstrap/bootstrap_agent_detail.log \
 #
 # The CustomScript extension (main.tf) re-executes its commandToExecute
 # on every instance model update - a VM resize, an OS image bump, VMSS
-# auto-repair. This script is a first-boot provisioner and is NOT
-# idempotent: it registers an EPHEMERAL runner, useradds actions-runner,
-# installs systemd units, and adds apt repos. Re-running it on an
-# already-configured instance fails partway and flips the whole
-# extension to "provisioning failed".
+# auto-repair. This script is a first-boot provisioner: it registers a
+# runner, useradds actions-runner, installs systemd units, and adds apt
+# repos. Re-running it on an already-configured instance can fail partway
+# and flip the whole extension to "provisioning failed".
 #
 # The sentinel is written as the very last step below, so a first boot
 # that fails midway is still retried on the next extension run.
@@ -53,7 +54,12 @@ GITHUB_SCOPE="repo"                          # "org" or "repo"
 GITHUB_ORG="gavinwun"                        # used when GITHUB_SCOPE=org
 GITHUB_REPO="gavinwun/azure_tests"           # "owner/repo", used when GITHUB_SCOPE=repo
 KEYVAULT_NAME="kv-ghrunner-25818"
-KEYVAULT_SECRET_NAME="github-app-token"     # short-lived GitHub App installation token
+# The instance mints its own GitHub App installation token at boot from the
+# App's PRIVATE KEY (stored once in Key Vault), rather than reading a
+# short-lived token kept fresh by a scheduled workflow. No 1-hour race, no
+# Actions-minutes cost, no dependency on GitHub's cron actually firing.
+GITHUB_APP_ID="4736345"                          # numeric App ID (App settings -> General)
+KEYVAULT_APP_KEY_SECRET_NAME="github-app-private-key"   # PEM, seed once (see setup/bootstrap.sh)
 RUNNER_VERSION="2.337.0"                     # pin, bump deliberately
 DOTNET_CHANNEL="8.0"                         # must be a channel packaged for this
                                             # Ubuntu release in packages.microsoft.com
@@ -106,7 +112,7 @@ apt_get() {
 # ---------------------------------------------------------------------
 apt_get update
 apt_get install -y \
-  curl jq zip unzip ca-certificates apt-transport-https gnupg \
+  curl jq zip unzip ca-certificates apt-transport-https gnupg openssl \
   lsb-release git build-essential libicu-dev
 
 # ---------------------------------------------------------------------
@@ -161,7 +167,7 @@ else
 fi
 
 # ---------------------------------------------------------------------
-# 6. GitHub Actions runner - download, register, run (ephemeral)
+# 6. GitHub Actions runner - download, register, run (persistent)
 #
 # Every step here is guarded so the script is safe to re-run even without
 # the run-once sentinel (e.g. on an instance that bootstrapped under an
@@ -182,35 +188,61 @@ fi
 id -u actions-runner &>/dev/null || useradd -m -s /bin/bash actions-runner
 chown -R actions-runner:actions-runner /opt/actions-runner
 
-# --- Fetch GitHub App/PAT token from Key Vault via this VM's managed identity ---
-# Each hop is checked and logged separately (HTTP status only, never the
-# token value) so a failure here says WHICH hop broke instead of a generic
-# "failed to obtain token".
+# --- GitHub App token minting helper ----------------------------------
+# /opt/actions-runner/mint-gh-token.sh prints a fresh GitHub App
+# INSTALLATION ACCESS TOKEN to stdout: reads the App private key from Key
+# Vault via this VM's managed identity, signs an App JWT, and exchanges it.
+# Used here and by the terminate-watcher below. Unquoted heredoc - the
+# ${...} refs are baked in now, \$... are evaluated at runtime.
+cat > /opt/actions-runner/mint-gh-token.sh <<MINT
+#!/usr/bin/env bash
+set -uo pipefail
+KEYVAULT_NAME="${KEYVAULT_NAME}"
+KEYVAULT_APP_KEY_SECRET_NAME="${KEYVAULT_APP_KEY_SECRET_NAME}"
+GITHUB_APP_ID="${GITHUB_APP_ID}"
+GH_API_BASE="${GH_API_BASE}"
 
-# 1. IMDS -> AAD token for Key Vault
-imds_resp=$(curl -s -w '\n%{http_code}' -H "Metadata:true" --retry 5 --retry-delay 3 --retry-connrefused \
-  "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" || true)
-imds_code=$(printf '%s' "${imds_resp}" | tail -n1)
-KV_TOKEN=$(printf '%s' "${imds_resp}" | sed '$d' | jq -r '.access_token // empty' 2>/dev/null || true)
-if [[ -z "${KV_TOKEN}" ]]; then
-  echo "FATAL: IMDS did not return an AAD token (HTTP ${imds_code}). Is a user-assigned identity attached to the VMSS?" >&2
-  printf '%s\n' "${imds_resp}" | sed '$d' | head -c 400 >&2; echo >&2
+fail() { echo "mint-gh-token: \$*" >&2; exit 1; }
+
+kv_aad=\$(curl -s --retry 5 --retry-delay 3 --retry-connrefused -H "Metadata:true" \\
+  "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" \\
+  | jq -r '.access_token // empty')
+[ -n "\${kv_aad}" ] || fail "no AAD token from IMDS - is a user-assigned identity attached?"
+
+pem=\$(curl -s --retry 5 --retry-delay 3 -H "Authorization: Bearer \${kv_aad}" \\
+  "https://\${KEYVAULT_NAME}.vault.azure.net/secrets/\${KEYVAULT_APP_KEY_SECRET_NAME}?api-version=7.4" \\
+  | jq -r '.value // empty')
+[ -n "\${pem}" ] || fail "Key Vault secret '\${KEYVAULT_APP_KEY_SECRET_NAME}' missing/empty (seed once: az keyvault secret set --vault-name \${KEYVAULT_NAME} --name \${KEYVAULT_APP_KEY_SECRET_NAME} --file <app>.private-key.pem)"
+
+kf=\$(mktemp); chmod 600 "\${kf}"; printf '%s\\n' "\${pem}" > "\${kf}"; unset pem
+b64u() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+now=\$(date -u +%s)
+hdr=\$(printf '{"alg":"RS256","typ":"JWT"}' | b64u)
+pl=\$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "\$((now-60))" "\$((now+540))" "\${GITHUB_APP_ID}" | b64u)
+sig=\$(printf '%s.%s' "\${hdr}" "\${pl}" | openssl dgst -sha256 -sign "\${kf}" -binary 2>/dev/null | b64u)
+shred -u "\${kf}" 2>/dev/null || rm -f "\${kf}"
+[ -n "\${sig}" ] || fail "could not sign JWT - the value in \${KEYVAULT_APP_KEY_SECRET_NAME} is not a valid RSA private key PEM"
+jwt="\${hdr}.\${pl}.\${sig}"
+
+iid=\$(curl -s -H "Authorization: Bearer \${jwt}" -H "Accept: application/vnd.github+json" \\
+  "\${GH_API_BASE}/installation" | jq -r '.id // empty')
+[ -n "\${iid}" ] || fail "no installation for \${GH_API_BASE} (App not installed there, wrong GITHUB_APP_ID=\${GITHUB_APP_ID}, or the key in Key Vault is not this App's current key)"
+
+tok=\$(curl -s -X POST -H "Authorization: Bearer \${jwt}" -H "Accept: application/vnd.github+json" \\
+  "https://api.github.com/app/installations/\${iid}/access_tokens" | jq -r '.token // empty')
+[ -n "\${tok}" ] || fail "installation token exchange failed for installation \${iid}"
+printf '%s' "\${tok}"
+MINT
+chmod +x /opt/actions-runner/mint-gh-token.sh
+chown actions-runner:actions-runner /opt/actions-runner/mint-gh-token.sh
+
+# --- Mint a fresh installation token, then exchange it for a runner
+#     REGISTRATION token (org or repo) ---
+GITHUB_TOKEN=$(/opt/actions-runner/mint-gh-token.sh) || {
+  echo "FATAL: could not mint a GitHub App token (see the 'mint-gh-token:' line above)." >&2
   exit 1
-fi
+}
 
-# 2. Key Vault -> the GitHub App installation token secret
-kv_resp=$(curl -s -w '\n%{http_code}' --retry 5 --retry-delay 3 \
-  -H "Authorization: Bearer ${KV_TOKEN}" \
-  "https://${KEYVAULT_NAME}.vault.azure.net/secrets/${KEYVAULT_SECRET_NAME}?api-version=7.4" || true)
-kv_code=$(printf '%s' "${kv_resp}" | tail -n1)
-GITHUB_TOKEN=$(printf '%s' "${kv_resp}" | sed '$d' | jq -r '.value // empty' 2>/dev/null || true)
-if [[ -z "${GITHUB_TOKEN}" ]]; then
-  echo "FATAL: Key Vault ${KEYVAULT_NAME} did not return secret '${KEYVAULT_SECRET_NAME}' (HTTP ${kv_code})." >&2
-  echo "  403 => the VMSS identity lacks 'Key Vault Secrets User'. 404 => the secret doesn't exist / never seeded." >&2
-  exit 1
-fi
-
-# 3. GitHub -> a short-lived runner REGISTRATION token (org or repo)
 reg_resp=$(curl -s -w '\n%{http_code}' --retry 3 --retry-delay 3 -X POST \
   -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
@@ -220,8 +252,7 @@ reg_body=$(printf '%s' "${reg_resp}" | sed '$d')
 REG_TOKEN=$(printf '%s' "${reg_body}" | jq -r '.token // empty' 2>/dev/null || true)
 if [[ -z "${REG_TOKEN}" ]]; then
   echo "FATAL: ${GH_API_BASE}/actions/runners/registration-token returned HTTP ${reg_code}, no token." >&2
-  echo "  401 => the github-app-token secret in Key Vault is expired (App tokens last ~1h - is refresh-github-app-token.yml running?)." >&2
-  echo "  403 => the GitHub App lacks 'Administration: Read and write' on ${GH_API_BASE##*/repos/} (repo scope) or 'Self-hosted runners' (org scope)." >&2
+  echo "  403 => the GitHub App lacks 'Administration: Read and write' (repo scope) / 'Self-hosted runners' (org scope)." >&2
   echo "  404 => wrong owner/repo in GH_API_BASE, or the App isn't installed there." >&2
   printf '  body: %s\n' "$(printf '%s' "${reg_body}" | jq -c '{message,documentation_url}' 2>/dev/null || printf '%s' "${reg_body}" | head -c 300)" >&2
   exit 1
@@ -229,11 +260,14 @@ fi
 
 INSTANCE_NAME="vmss-runner-$(hostname)"
 
-# Skip re-registration if this instance already has a configured runner
-# (idle, waiting for a job). Ephemeral runners delete .runner themselves
-# after their one job, so a missing .runner here just means "register
-# fresh". --replace overwrites any stale server-side registration that
-# still holds this name (e.g. a prior instance with the same hostname).
+# Persistent runner: registered once, takes job after job until VMSS
+# scale-in reclaims the instance (terminate-watcher.sh deregisters it
+# first). No --ephemeral - that's the ACI model (one container per job).
+#
+# .runner persists across reboots, so if it's already here the runner is
+# configured and just needs its service (re)started - don't re-register.
+# --replace overwrites any stale server-side registration still holding
+# this name (e.g. a prior instance with the same hostname).
 if [[ -f /opt/actions-runner/.runner ]]; then
   echo "Runner already configured - leaving existing registration in place."
 else
@@ -243,7 +277,6 @@ else
     --name "${INSTANCE_NAME}" \
     --labels "${RUNNER_LABELS}" \
     --runnergroup "${RUNNER_GROUP}" \
-    --ephemeral \
     --unattended \
     --replace
 fi
@@ -277,22 +310,15 @@ set -uo pipefail   # no -e: this loops indefinitely and retries through transien
 
 IMDS_EVENTS_URL="http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01"
 GH_API_BASE="${GH_API_BASE}"
-KEYVAULT_NAME="${KEYVAULT_NAME}"
-KEYVAULT_SECRET_NAME="${KEYVAULT_SECRET_NAME}"
 RUNNER_DIR="/opt/actions-runner"
 POLL_INTERVAL=5
 
 log() { echo "[terminate-watcher] \$(date -u +%FT%TZ) \$*"; }
 
+# Mint a fresh GitHub App installation token from the private key in Key
+# Vault (same helper the bootstrap uses). Prints empty on failure.
 get_github_app_token() {
-  local kv_token gh_token
-  kv_token=\$(curl -s -H "Metadata:true" \\
-    "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" \\
-    | jq -r '.access_token')
-  gh_token=\$(curl -s -H "Authorization: Bearer \${kv_token}" \\
-    "https://\${KEYVAULT_NAME}.vault.azure.net/secrets/\${KEYVAULT_SECRET_NAME}?api-version=7.4" \\
-    | jq -r '.value')
-  echo "\${gh_token}"
+  \${RUNNER_DIR}/mint-gh-token.sh 2>/dev/null || true
 }
 
 runner_busy() {
@@ -319,7 +345,7 @@ deregister_runner() {
   cd "\${RUNNER_DIR}" || return 1
   sudo -u actions-runner ./svc.sh stop || true
   sudo -u actions-runner ./config.sh remove --token "\${remove_token}" || \\
-    log "config.sh remove failed (runner may already be deregistered, e.g. it just finished an ephemeral job) - continuing"
+    log "config.sh remove failed (runner may already be gone) - continuing"
 }
 
 approve_event() {

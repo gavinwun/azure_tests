@@ -99,6 +99,7 @@ jobs:
           ACI_IDENTITY_ID: ${{ vars.ACI_IDENTITY_ID }}
           LOCATION: ${{ vars.VMSS_REGION }}   # reused var name, just means "deployment region"
           KEYVAULT_NAME: ${{ vars.KEYVAULT_NAME }}
+          GH_APP_ID: ${{ vars.RUNNER_BOOTSTRAP_APP_ID }}   # GITHUB_ prefix is reserved in workflow env
           RUNNER_SCOPE: ${{ vars.RUNNER_SCOPE || 'org' }}
           OWNER: ${{ github.repository_owner }}
           TARGET_REPO: ${{ github.repository }}
@@ -148,7 +149,7 @@ jobs:
                 GITHUB_ORG="${OWNER}" \
                 GITHUB_REPO="${TARGET_REPO}" \
                 KEYVAULT_NAME="${KEYVAULT_NAME}" \
-                KEYVAULT_SECRET_NAME="github-app-token" \
+                GITHUB_APP_ID="${GH_APP_ID}" \
               --tags "${TAG_KEY}=${TAG_VALUE}" \
               --no-wait
           done

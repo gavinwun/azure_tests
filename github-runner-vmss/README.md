@@ -4,8 +4,10 @@ Two interchangeable compute backends, switched with one Terraform
 variable (`compute_backend = "vmss"` or `"aci"`):
 
 - **vmss** (default) - Ubuntu VMSS instances that boot, install tooling
-  via a bootstrap script, register as ephemeral runners, run one job,
-  and are scaled by a queue-depth-driven Azure Monitor autoscale rule.
+  via a bootstrap script, register as persistent runners (one runner per
+  instance, job after job), and are scaled by a queue-depth-driven Azure
+  Monitor autoscale rule; `terminate-watcher.sh` deregisters a runner
+  gracefully when scale-in reclaims its instance.
 - **aci** - Azure Container Instances running a prebuilt Docker image
   with the same tooling baked in. No autoscale primitive exists for
   ACI, so a GitHub Actions workflow directly creates/deletes container
@@ -42,7 +44,7 @@ docker/
   Dockerfile                   ACI only: runner image, built by build-and-push-runner-image.yml
   entrypoint.sh                ACI only: container's registration + run logic
 .github/workflows/
-  refresh-github-app-token.yml       Keeps Key Vault secret fresh (both backends)
+  (instances mint their own GitHub App token at boot - no refresh workflow)
   terraform-deploy.yml               CI/CD: plans on PR, applies on merge to main (both backends)
   poll-queue-depth.yml               VMSS only: publishes custom metric for autoscale
   reconcile-aci-runners.yml          ACI only: creates/deletes container groups directly
@@ -314,21 +316,30 @@ Repo → Settings → Secrets and variables → Actions:
 | `AZURE_SUBSCRIPTION_ID` | Variable | subscription containing the Key Vault |
 | `KEYVAULT_NAME` | Variable | the Key Vault name |
 
-### 4. Seed the Key Vault secret (manual first run)
+### 4. Seed the GitHub App private key into Key Vault
 
-Push `.github/workflows/refresh-github-app-token.yml`, then trigger it
-manually once before running Terraform:
+Each runner instance mints its own short-lived installation token **at boot**
+from the App's private key (`bootstrap_agent.sh` / `entrypoint.sh` sign an
+App JWT and exchange it). There is no scheduled refresh workflow and no
+`github-app-token` secret to keep warm - just seed the private key once:
 
-Repo → Actions → "Refresh GitHub App Token in Key Vault" → Run workflow
-
-Confirm the secret landed:
 ```bash
-az keyvault secret show --vault-name <key-vault-name> --name github-app-token \
-  --query "attributes.{updated:updated, expires:expires}"
+az keyvault secret set --vault-name <key-vault-name> \
+  --name github-app-private-key --file <app>.private-key.pem
 ```
 
-The workflow re-runs itself every 30 minutes after this (`on: schedule`),
-so it now stays fresh without further action.
+(`setup/bootstrap.sh` does this automatically when you pass
+`--github-app-private-key-file`.) Also set `GITHUB_APP_ID` in
+`terraform/scripts/bootstrap_agent.sh` (step 6) to the numeric App ID, and
+- for the ACI backend - the `RUNNER_BOOTSTRAP_APP_ID` repo variable, which
+`reconcile-aci-runners.yml` passes to each container.
+
+> The old model (a `refresh-github-app-token.yml` cron keeping a 1-hour
+> `github-app-token` secret fresh) was removed: it cost Actions minutes,
+> broke whenever GitHub's scheduler skipped a run, and the token was dead
+> by the time a slow instance boot needed it. The `gh-runner-token-refresh`
+> AAD app and `RUNNER_BOOTSTRAP_APP_PRIVATE_KEY` repo secret are now
+> unused - `teardown.sh` removes them.
 
 ### 5. Store the VMSS SSH key pair in Key Vault
 
@@ -1096,14 +1107,14 @@ az container list --resource-group <resource-group-name> \
 concept; see its caveats above instead.
 
 
-`--ephemeral` runners deregister themselves automatically **after
-completing a job**. Without help, an instance that VMSS scale-in
-deallocates while idle (never picked up a job) would leave its runner
-registration "offline" in GitHub's list for up to 24 hours until GitHub's
-own cleanup reaps it - correctness isn't affected (GitHub never dispatches
-jobs to an offline runner), but it's dashboard clutter.
+The VMSS runners are **persistent** (no `--ephemeral`), so nothing
+deregisters them on its own. When VMSS scale-in deallocates an instance,
+its runner registration would otherwise sit "offline" in GitHub's list for
+up to 24 hours until GitHub's own cleanup reaps it - correctness isn't
+affected (GitHub never dispatches jobs to an offline runner), but it's
+dashboard clutter.
 
-This is now closed by two pieces working together:
+This is closed by two pieces working together:
 
 - **`termination_notification` on the VMSS** (`main.tf`) - gives Azure a
   5-minute warning window before it actually deallocates a targeted

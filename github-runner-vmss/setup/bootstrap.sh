@@ -394,6 +394,34 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# GitHub App private key -> Key Vault (secret: github-app-private-key)
+#
+# The runner instances mint their own installation token at boot from this
+# key (bootstrap_agent.sh / entrypoint.sh) - no scheduled refresh workflow,
+# no short-lived token to keep warm. Seeded whenever a key file is passed.
+# ---------------------------------------------------------------------------
+step "GitHub App private key -> Key Vault (github-app-private-key)"
+if [[ -z "$GITHUB_APP_KEY_FILE" ]]; then
+  warn "no --github-app-private-key-file: skipped github-app-private-key"
+  manual_step "Seed the App private key so instances can mint their own token:
+  az keyvault secret set --vault-name $KV_NAME --name github-app-private-key --file <app>.private-key.pem"
+elif [[ ! -f "$GITHUB_APP_KEY_FILE" ]]; then
+  warn "--github-app-private-key-file '$GITHUB_APP_KEY_FILE' not found - skipped github-app-private-key"
+elif [[ "$DRY_RUN" == "1" ]]; then
+  run az keyvault secret set --vault-name "$KV_NAME" --name github-app-private-key --value "<pem contents>" -o none
+else
+  pem_val="$(cat "$GITHUB_APP_KEY_FILE")"
+  if retry 6 20 -- kv_secret_set "$KV_NAME" github-app-private-key "$pem_val"; then
+    ok "stored github-app-private-key"
+    state_set CREATED_APP_KEY_SECRET "1"
+  else
+    ROLE_FAILURES=$((ROLE_FAILURES + 1))
+    warn "could not write github-app-private-key (Key Vault data-plane access not ready?). Re-run bootstrap.sh shortly."
+  fi
+  unset pem_val
+fi
+
+# ---------------------------------------------------------------------------
 # App registration helper
 # ---------------------------------------------------------------------------
 ensure_app() {
