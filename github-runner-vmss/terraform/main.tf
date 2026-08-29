@@ -64,11 +64,16 @@ resource "azurerm_storage_container" "scripts" {
 resource "azurerm_storage_blob" "bootstrap_script" {
   count = var.compute_backend == "vmss" ? 1 : 0
 
-  name                   = "bootstrap_agent.sh"
-  storage_account_name   = azurerm_storage_account.bootstrap[0].name
-  storage_container_name = azurerm_storage_container.scripts[0].name
-  type                   = "Block"
-  source                 = "${path.module}/scripts/bootstrap_agent.sh"
+  name                 = "bootstrap_agent.sh"
+  storage_container_id = azurerm_storage_account.bootstrap.id
+  type                 = "Block"
+  source               = "${path.module}/scripts/bootstrap_agent.sh"
+
+  # Without this, azurerm_storage_blob only uploads on first create and
+  # never notices later edits to the source file - plan shows no diff and
+  # instances keep pulling the stale script. filemd5() makes any content
+  # change to bootstrap_agent.sh force a re-upload on the next apply.
+  content_md5 = filemd5("${path.module}/scripts/bootstrap_agent.sh")
 
   # This is a data-plane write authenticated with the pipeline identity's
   # AAD token (shared_access_key_enabled = false), so the role assignment
