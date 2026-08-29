@@ -26,6 +26,7 @@ jobs:
   deploy:
     if: vars.COMPUTE_BACKEND == 'vmss' || vars.COMPUTE_BACKEND == ''
     runs-on: ubuntu-latest
+    environment: production   # requires a manual approver - configure under repo Settings > Environments
     env:
       FUNC_DIR: github-runner-vmss/queue-metric-function
     steps:
