@@ -30,7 +30,12 @@ managed identity.
    `Monitoring Metrics Publisher` on the VMSS and `Key Vault Secrets User` on
    the vault.
 
-2. **Repo variable** - point the deploy workflow at the app:
+   > The Function App must exist before the deploy workflow can run - this
+   > `apply` is what creates it.
+
+2. **Repo variable** - the deploy workflow finds the app by name prefix in
+   `RESOURCE_GROUP_NAME` (set by `setup/bootstrap.sh --set-github`), so this
+   is only needed to override that:
    ```bash
    gh variable set QUEUE_METRIC_FUNCTION_NAME --repo <owner>/<repo> \
      --body "$(terraform -chdir=github-runner-vmss/terraform output -raw queue_metric_function_name)"

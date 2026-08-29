@@ -46,10 +46,30 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      - name: Resolve Function App name
+        id: fn
+        env:
+          NAME_OVERRIDE: ${{ vars.QUEUE_METRIC_FUNCTION_NAME }}
+          RESOURCE_GROUP_NAME: ${{ vars.RESOURCE_GROUP_NAME }}
+        run: |
+          set -euo pipefail
+          NAME="${NAME_OVERRIDE}"
+          if [ -z "${NAME}" ]; then
+            [ -n "${RESOURCE_GROUP_NAME}" ] || { echo "::error::set the QUEUE_METRIC_FUNCTION_NAME or RESOURCE_GROUP_NAME repo variable"; exit 1; }
+            NAME=$(az functionapp list -g "${RESOURCE_GROUP_NAME}" \
+              --query "[?starts_with(name, 'func-ghrunner-queue-')].name | [0]" -o tsv || true)
+          fi
+          if [ -z "${NAME}" ]; then
+            echo "::error::no 'func-ghrunner-queue-*' Function App in resource group '${RESOURCE_GROUP_NAME}' - run 'terraform apply' with enable_queue_metric_function = true first"
+            exit 1
+          fi
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Deploying to ${NAME}"
+
       - name: Deploy to Function App
         uses: Azure/functions-action@v1
         with:
-          app-name: ${{ vars.QUEUE_METRIC_FUNCTION_NAME }}
+          app-name: ${{ steps.fn.outputs.name }}
           package: ${{ env.FUNC_DIR }}
           respect-funcignore: true
           scm-do-build-during-deployment: false
