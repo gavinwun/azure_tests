@@ -47,7 +47,10 @@ resource "azurerm_monitor_autoscale_setting" "vmss_queue_autoscale" {
       }
     }
 
-    # Scale IN when the queue is quiet
+    # Scale IN when the queue is quiet. Longer window than scale-out (10 vs
+    # 5 min) so a brief lull between jobs doesn't drain the fleet - and,
+    # with min = 0, so the last runner isn't yanked the moment a job
+    # finishes but another is about to be queued.
     rule {
       metric_trigger {
         metric_name              = var.custom_metric_name
@@ -55,7 +58,7 @@ resource "azurerm_monitor_autoscale_setting" "vmss_queue_autoscale" {
         metric_resource_id       = azurerm_linux_virtual_machine_scale_set.vmss[0].id
         time_grain               = "PT1M"
         statistic                = "Average"
-        time_window              = "PT5M"
+        time_window              = "PT${var.queue_scale_in_time_window_minutes}M"
         time_aggregation         = "Average"
         operator                 = "LessThan"
         threshold                = var.queue_messages_per_instance

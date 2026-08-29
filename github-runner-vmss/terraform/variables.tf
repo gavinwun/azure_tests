@@ -169,6 +169,23 @@ variable "queue_autoscale_max_instances" {
   default     = 2
 }
 
+variable "queue_scale_in_time_window_minutes" {
+  description = "How long the queue must stay below threshold (averaged) before autoscale removes an instance. Longer than the scale-out window so a short gap between jobs doesn't drain the fleet; matters most with queue_autoscale_min_instances = 0."
+  type        = number
+  default     = 10
+}
+
+variable "scale_in_grace_period" {
+  description = "ISO-8601 duration Azure waits after flagging an instance for scale-in before it force-deallocates - lets terminate-watcher.sh deregister the runner and an in-flight job finish. Azure allows PT5M to PT15M."
+  type        = string
+  default     = "PT15M"
+
+  validation {
+    condition     = contains(["PT5M", "PT6M", "PT7M", "PT8M", "PT9M", "PT10M", "PT11M", "PT12M", "PT13M", "PT14M", "PT15M"], var.scale_in_grace_period)
+    error_message = "scale_in_grace_period must be an ISO-8601 minute duration from PT5M to PT15M (e.g. \"PT15M\")."
+  }
+}
+
 variable "queue_autoscale_default_instances" {
   description = "Initial instance count on first create. Terraform ignores drift from this afterwards (see lifecycle block in main.tf) - Azure Monitor owns the live count."
   type        = number

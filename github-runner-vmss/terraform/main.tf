@@ -258,18 +258,19 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
   platform_fault_domain_count = 1
 
   # -----------------------------------------------------------------
-  # Gives each instance a warning window before scale-in actually
-  # deallocates it, so terminate-watcher.sh (installed by
-  # bootstrap_agent.sh) has time to deregister the runner from GitHub
-  # first, rather than leaving a stale "offline" registration behind.
-  # 5 min is the minimum Azure allows; raise toward 15 min if your jobs
-  # commonly run long and you want more grace before a mid-job instance
-  # gets cut off anyway (Azure force-terminates once this timeout
-  # elapses regardless of job state).
+  # Warning window before scale-in actually deallocates an instance, so
+  # terminate-watcher.sh (installed by bootstrap_agent.sh) can deregister
+  # the runner from GitHub first, and an in-flight job has grace to finish
+  # (the watcher defers deregistration while Runner.Worker is alive).
+  # Azure force-terminates once this elapses regardless of job state.
+  # Range Azure allows: PT5M - PT15M. Default PT15M here because the
+  # autoscale metric counts *queued* jobs, not running ones - so a lone
+  # instance running a job can be picked for scale-in the moment the queue
+  # empties, and you want the longest grace to let that job land.
   # -----------------------------------------------------------------
   termination_notification {
     enabled = true
-    timeout = "PT5M"
+    timeout = var.scale_in_grace_period
   }
 
   # -----------------------------------------------------------------
