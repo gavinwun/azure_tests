@@ -25,7 +25,13 @@ jobs:
         with:
           app-id: ${{ vars.RUNNER_BOOTSTRAP_APP_ID }}
           private-key: ${{ secrets.RUNNER_BOOTSTRAP_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}   # scopes to your org's installation
+          owner: ${{ github.repository_owner }}   # scopes to the account's installation
+          # CRITICAL: by default this action REVOKES the token in a post-job
+          # step. This workflow's whole purpose is to stash the token in Key
+          # Vault for a VMSS instance to use later, so the token must outlive
+          # the job. Without this, Key Vault always holds a dead token
+          # (401 Bad credentials, fresh iat, not expired).
+          skip-token-revoke: true
 
       - name: Azure login (OIDC)
         uses: azure/login@v2

@@ -55,7 +55,10 @@ GITHUB_REPO="gavinwun/azure_tests"           # "owner/repo", used when GITHUB_SC
 KEYVAULT_NAME="kv-ghrunner-25818"
 KEYVAULT_SECRET_NAME="github-app-token"     # short-lived GitHub App installation token
 RUNNER_VERSION="2.337.0"                     # pin, bump deliberately
-DOTNET_CHANNEL="10.0"
+DOTNET_CHANNEL="8.0"                         # must be a channel packaged for this
+                                            # Ubuntu release in packages.microsoft.com
+                                            # (8.0 LTS for jammy). NOT 10.0 - no jammy
+                                            # package exists, install just fails.
 RUNNER_LABELS="self-hosted,linux,x64,vmss"
 RUNNER_GROUP="default"
 
