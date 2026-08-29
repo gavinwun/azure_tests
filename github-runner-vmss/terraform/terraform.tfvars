@@ -55,6 +55,12 @@ compute_backend = "vmss"
 enable_vmss_monitoring     = true
 log_analytics_workspace_id = ""
 
+# Object (principal) id of the gh-runner-queue-poller SP. When set,
+# Terraform grants it 'Monitoring Metrics Publisher' on the VMSS so
+# poll-queue-depth.yml can publish the autoscale metric - no manual
+# post-apply az step. Get it: az ad sp show --id <poller-client-id> --query id -o tsv
+queue_poller_principal_id = "b01481e4-2d39-4ffc-a7ff-6f17a82814bf"
+
 tags = {
   costCentre = "platform-engineering"
 }

@@ -519,11 +519,13 @@ if [[ "$WITH_POLLER" == "1" ]]; then
   step "App: $APP_POLLER"
   read -r POLLER_APPID POLLER_OBJID < <(ensure_app "$APP_POLLER")
   add_fics "$POLLER_OBJID" "queue-poller" "ref:refs/heads/main"
-  manual_step "Grant '$APP_POLLER' the 'Monitoring Metrics Publisher' role on the VMSS,
-AFTER the first successful 'terraform apply' (the VMSS must exist):
-  az role assignment create --assignee ${POLLER_APPID:-<poller-client-id>} \\
-    --role 'Monitoring Metrics Publisher' \\
-    --scope \$(terraform -chdir=../terraform output -raw vmss_id)"
+  # The 'Monitoring Metrics Publisher' grant on the VMSS is done by
+  # Terraform (custom-metric-autoscale.tf) once you give it the poller
+  # SP's OBJECT id - no manual post-apply step. Resolve it here.
+  POLLER_SP_OID="$([[ "$DRY_RUN" == "1" ]] && echo "<poller-sp-object-id>" || sp_oid "$POLLER_APPID")"
+  manual_step "Set queue_poller_principal_id in terraform/terraform.tfvars so Terraform
+grants '$APP_POLLER' 'Monitoring Metrics Publisher' on the VMSS:
+  queue_poller_principal_id = \"${POLLER_SP_OID:-<run: az ad sp show --id ${POLLER_APPID} --query id -o tsv>}\""
 fi
 
 # ---------------------------------------------------------------------------

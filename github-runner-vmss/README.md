@@ -867,10 +867,12 @@ az ad app federated-credential create --id "$appId" --parameters '{
   "audiences": ["api://AzureADTokenExchange"]
 }'
 
-az role assignment create \
-  --assignee "$appId" \
-  --role "Monitoring Metrics Publisher" \
-  --scope $(terraform -chdir=terraform output -raw vmss_id)
+# Grab the SP's OBJECT id and put it in terraform/terraform.tfvars as
+#   queue_poller_principal_id = "<this value>"
+# Terraform then grants 'Monitoring Metrics Publisher' on the VMSS itself
+# (custom-metric-autoscale.tf) - no manual role assignment, no
+# after-apply step, and it's tracked in state.
+az ad sp show --id "$appId" --query id -o tsv
 ```
 
 ### C. Add repo variables

@@ -30,13 +30,13 @@ resource "azurerm_monitor_autoscale_setting" "vmss_queue_autoscale" {
         metric_name              = var.custom_metric_name
         metric_namespace         = var.custom_metric_namespace
         metric_resource_id       = azurerm_linux_virtual_machine_scale_set.vmss[0].id
-        time_grain                = "PT1M"
-        statistic                 = "Average"
-        time_window                = "PT5M"
-        time_aggregation           = "Average"
-        operator                   = "GreaterThanOrEqual"
-        threshold                  = var.queue_messages_per_instance
-        divide_by_instance_count   = true
+        time_grain               = "PT1M"
+        statistic                = "Average"
+        time_window              = "PT5M"
+        time_aggregation         = "Average"
+        operator                 = "GreaterThanOrEqual"
+        threshold                = var.queue_messages_per_instance
+        divide_by_instance_count = true
       }
 
       scale_action {
@@ -53,13 +53,13 @@ resource "azurerm_monitor_autoscale_setting" "vmss_queue_autoscale" {
         metric_name              = var.custom_metric_name
         metric_namespace         = var.custom_metric_namespace
         metric_resource_id       = azurerm_linux_virtual_machine_scale_set.vmss[0].id
-        time_grain                = "PT1M"
-        statistic                 = "Average"
-        time_window                = "PT5M"
-        time_aggregation           = "Average"
-        operator                   = "LessThan"
-        threshold                  = var.queue_messages_per_instance
-        divide_by_instance_count   = true
+        time_grain               = "PT1M"
+        statistic                = "Average"
+        time_window              = "PT5M"
+        time_aggregation         = "Average"
+        operator                 = "LessThan"
+        threshold                = var.queue_messages_per_instance
+        divide_by_instance_count = true
       }
 
       scale_action {
@@ -70,4 +70,21 @@ resource "azurerm_monitor_autoscale_setting" "vmss_queue_autoscale" {
       }
     }
   }
+}
+
+# --- Let the poller publish the custom metric ------------------------------
+# poll-queue-depth.yml authenticates as gh-runner-queue-poller and POSTs the
+# queue-depth metric against the VMSS. That needs 'Monitoring Metrics
+# Publisher' scoped to the VMSS - which can only be granted once the VMSS
+# exists, so it used to be a manual post-apply `az role assignment create`.
+# Set queue_poller_principal_id (the SP's OBJECT id) and Terraform does it.
+# principal_type is pinned so a fresh SP that hasn't replicated yet doesn't
+# fail the assignment.
+resource "azurerm_role_assignment" "poller_metrics_publisher" {
+  count = var.compute_backend == "vmss" && var.queue_poller_principal_id != "" ? 1 : 0
+
+  scope                = azurerm_linux_virtual_machine_scale_set.vmss[0].id
+  role_definition_name = "Monitoring Metrics Publisher"
+  principal_id         = var.queue_poller_principal_id
+  principal_type       = "ServicePrincipal"
 }

@@ -193,6 +193,12 @@ variable "queue_messages_per_instance" {
   default     = 1
 }
 
+variable "queue_poller_principal_id" {
+  description = "Object (principal) ID of the gh-runner-queue-poller service principal - the identity poll-queue-depth.yml uses to POST the custom queue-depth metric. When set (vmss backend), Terraform grants it 'Monitoring Metrics Publisher' on the VMSS, replacing the manual post-apply `az role assignment create`. Get it with: az ad sp show --id <poller-client-id> --query id -o tsv. Leave empty to skip (grant it by hand later)."
+  type        = string
+  default     = ""
+}
+
 #########################################################################
 # Monitoring - Azure Monitor Agent (AMA), vmss backend only
 #########################################################################

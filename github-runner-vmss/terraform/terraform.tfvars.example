@@ -50,6 +50,13 @@ log_analytics_workspace_id = ""
 # log_analytics_retention_days        = 30
 # vmss_perf_counter_sampling_seconds  = 60
 
+# Object (principal) id of the gh-runner-queue-poller SP (optional section B).
+# Set it and Terraform grants 'Monitoring Metrics Publisher' on the VMSS so
+# poll-queue-depth.yml can publish the autoscale metric - replaces the manual
+# post-apply `az role assignment create`. Empty = skip / grant by hand.
+#   az ad sp show --id <poller-client-id> --query id -o tsv
+queue_poller_principal_id = ""
+
 tags = {
   costCentre = "platform-engineering"
 }
