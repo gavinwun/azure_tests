@@ -36,10 +36,19 @@ managed identity.
      --body "$(terraform -chdir=github-runner-vmss/terraform output -raw queue_metric_function_name)"
    ```
 
-3. **Deploy the code** - push a change under `queue-metric-function/**`, or run
+3. **Commit `package-lock.json`** - the deploy workflow runs `npm ci`, which
+   needs the lockfile checked in next to `package.json`. It already is; if you
+   ever change `package.json`, regenerate and commit it:
+   ```bash
+   cd github-runner-vmss/queue-metric-function
+   npm install --package-lock-only
+   git add package.json package-lock.json
+   ```
+
+4. **Deploy the code** - push a change under `queue-metric-function/**`, or run
    the **Deploy Queue-Metric Function** workflow manually.
 
-4. **Webhook** (optional but recommended) - on the GitHub **org** (or repo)
+5. **Webhook** (optional but recommended) - on the GitHub **org** (or repo)
    -> Settings -> Webhooks -> Add webhook:
    - Payload URL: `terraform output -raw queue_metric_function_webhook_url` + `?code=<function key>`
      (`az functionapp function keys list -g <rg> -n <app> --function-name workflowJobWebhook`)
