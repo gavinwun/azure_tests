@@ -180,24 +180,47 @@ id -u actions-runner &>/dev/null || useradd -m -s /bin/bash actions-runner
 chown -R actions-runner:actions-runner /opt/actions-runner
 
 # --- Fetch GitHub App/PAT token from Key Vault via this VM's managed identity ---
-KV_TOKEN=$(curl -s -H "Metadata:true" \
-  "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" \
-  | jq -r '.access_token')
+# Each hop is checked and logged separately (HTTP status only, never the
+# token value) so a failure here says WHICH hop broke instead of a generic
+# "failed to obtain token".
 
-GITHUB_TOKEN=$(curl -s \
+# 1. IMDS -> AAD token for Key Vault
+imds_resp=$(curl -s -w '\n%{http_code}' -H "Metadata:true" --retry 5 --retry-delay 3 --retry-connrefused \
+  "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net" || true)
+imds_code=$(printf '%s' "${imds_resp}" | tail -n1)
+KV_TOKEN=$(printf '%s' "${imds_resp}" | sed '$d' | jq -r '.access_token // empty' 2>/dev/null || true)
+if [[ -z "${KV_TOKEN}" ]]; then
+  echo "FATAL: IMDS did not return an AAD token (HTTP ${imds_code}). Is a user-assigned identity attached to the VMSS?" >&2
+  printf '%s\n' "${imds_resp}" | sed '$d' | head -c 400 >&2; echo >&2
+  exit 1
+fi
+
+# 2. Key Vault -> the GitHub App installation token secret
+kv_resp=$(curl -s -w '\n%{http_code}' --retry 5 --retry-delay 3 \
   -H "Authorization: Bearer ${KV_TOKEN}" \
-  "https://${KEYVAULT_NAME}.vault.azure.net/secrets/${KEYVAULT_SECRET_NAME}?api-version=7.4" \
-  | jq -r '.value')
+  "https://${KEYVAULT_NAME}.vault.azure.net/secrets/${KEYVAULT_SECRET_NAME}?api-version=7.4" || true)
+kv_code=$(printf '%s' "${kv_resp}" | tail -n1)
+GITHUB_TOKEN=$(printf '%s' "${kv_resp}" | sed '$d' | jq -r '.value // empty' 2>/dev/null || true)
+if [[ -z "${GITHUB_TOKEN}" ]]; then
+  echo "FATAL: Key Vault ${KEYVAULT_NAME} did not return secret '${KEYVAULT_SECRET_NAME}' (HTTP ${kv_code})." >&2
+  echo "  403 => the VMSS identity lacks 'Key Vault Secrets User'. 404 => the secret doesn't exist / never seeded." >&2
+  exit 1
+fi
 
-# --- Exchange for a short-lived runner REGISTRATION token (org or repo) ---
-REG_TOKEN=$(curl -s -X POST \
+# 3. GitHub -> a short-lived runner REGISTRATION token (org or repo)
+reg_resp=$(curl -s -w '\n%{http_code}' --retry 3 --retry-delay 3 -X POST \
   -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   -H "Accept: application/vnd.github+json" \
-  "${GH_API_BASE}/actions/runners/registration-token" \
-  | jq -r '.token')
-
-if [[ -z "${REG_TOKEN}" || "${REG_TOKEN}" == "null" ]]; then
-  echo "Failed to obtain GitHub runner registration token" >&2
+  "${GH_API_BASE}/actions/runners/registration-token" || true)
+reg_code=$(printf '%s' "${reg_resp}" | tail -n1)
+reg_body=$(printf '%s' "${reg_resp}" | sed '$d')
+REG_TOKEN=$(printf '%s' "${reg_body}" | jq -r '.token // empty' 2>/dev/null || true)
+if [[ -z "${REG_TOKEN}" ]]; then
+  echo "FATAL: ${GH_API_BASE}/actions/runners/registration-token returned HTTP ${reg_code}, no token." >&2
+  echo "  401 => the github-app-token secret in Key Vault is expired (App tokens last ~1h - is refresh-github-app-token.yml running?)." >&2
+  echo "  403 => the GitHub App lacks 'Administration: Read and write' on ${GH_API_BASE##*/repos/} (repo scope) or 'Self-hosted runners' (org scope)." >&2
+  echo "  404 => wrong owner/repo in GH_API_BASE, or the App isn't installed there." >&2
+  printf '  body: %s\n' "$(printf '%s' "${reg_body}" | jq -c '{message,documentation_url}' 2>/dev/null || printf '%s' "${reg_body}" | head -c 300)" >&2
   exit 1
 fi
 
