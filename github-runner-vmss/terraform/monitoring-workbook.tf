@@ -71,11 +71,16 @@ resource "azurerm_monitor_diagnostic_setting" "autoscale" {
   target_resource_id         = azurerm_monitor_autoscale_setting.vmss_queue_autoscale[0].id
   log_analytics_workspace_id = local.effective_log_analytics_workspace_id
 
+  # Route to the resource-specific tables (AutoscaleEvaluationsLog /
+  # AutoscaleScaleActionsLog) rather than the generic AzureDiagnostics
+  # blob - typed columns, and what the workbook's Capacity tab queries.
+  log_analytics_destination_type = "Dedicated"
+
   enabled_log {
     category = "AutoscaleEvaluations"
   }
 
   enabled_log {
-    category = "AutoscaleScaleActionsLog"
+    category = "AutoscaleScaleActions"
   }
 }

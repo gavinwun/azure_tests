@@ -381,7 +381,7 @@
       "name": "cap-scaleactions",
       "content": {
         "version": "KqlItem/1.0",
-        "query": "AzureDiagnostics | where Category == 'AutoscaleScaleActionsLog' | sort by TimeGenerated desc | take 200",
+        "query": "AutoscaleScaleActionsLog | sort by TimeGenerated desc | take 200",
         "size": 0,
         "title": "Autoscale - scale actions",
         "timeContextFromParameter": "TimeRange",
@@ -397,7 +397,7 @@
       "name": "cap-scaleeval",
       "content": {
         "version": "KqlItem/1.0",
-        "query": "AzureDiagnostics | where Category == 'AutoscaleEvaluations' | sort by TimeGenerated desc | take 200",
+        "query": "AutoscaleEvaluationsLog | sort by TimeGenerated desc | take 200",
         "size": 0,
         "title": "Autoscale - evaluations (why it did / didn't scale)",
         "timeContextFromParameter": "TimeRange",
@@ -676,7 +676,7 @@
       "type": 1,
       "name": "al-recommended",
       "content": {
-        "json": "### Recommended alert rules\n\n| Alert | Signal | Condition | Severity |\n|---|---|---|---|\n| **Low disk space** | `Perf` - `Logical Disk` / `% Used Space`, split by `Computer` | `>= {DiskCrit}` for 15 min | 2 (warning at `>= {DiskWarn}`) |\n| **High CPU** | Scale set metric `Percentage CPU` | `> {CpuCrit}` avg over 15 min | 3 |\n| **Low memory** | `Perf` - `Memory` / `Available MBytes`, split by `Computer` | `< ${mem_low_mb}` for 15 min | 3 |\n| **Bootstrap failure** | `Syslog` `Facility == 'local0'` with `ERROR` / `FATAL` | any in 10 min | 1 |\n| **Runner heartbeat lost** | `Heartbeat`, split by `Computer` | no beat for 15 min while any instance is expected | 2 |\n| **Autoscale action failed** | `AzureDiagnostics` `Category == 'AutoscaleScaleActionsLog'` result not `Succeeded` | any in 15 min | 2 |\n| **Scale set provisioning failed** | Activity Log - `Microsoft.Compute/virtualMachineScaleSets` write, status `Failed` | any | 1 |\n\n`enable_monitoring_alerts = true` in `terraform.tfvars` provisions the first five plus an email action group (`monitoring_alert_email`). The last two are documented for you to add against your own action group / Activity Log."
+        "json": "### Recommended alert rules\n\n| Alert | Signal | Condition | Severity |\n|---|---|---|---|\n| **Low disk space** | `Perf` - `Logical Disk` / `% Used Space`, split by `Computer` | `>= {DiskCrit}` for 15 min | 2 (warning at `>= {DiskWarn}`) |\n| **High CPU** | Scale set metric `Percentage CPU` | `> {CpuCrit}` avg over 15 min | 3 |\n| **Low memory** | `Perf` - `Memory` / `Available MBytes`, split by `Computer` | `< ${mem_low_mb}` for 15 min | 3 |\n| **Bootstrap failure** | `Syslog` `Facility == 'local0'` with `ERROR` / `FATAL` | any in 10 min | 1 |\n| **Runner heartbeat lost** | `Heartbeat`, split by `Computer` | no beat for 15 min while any instance is expected | 2 |\n| **Autoscale action failed** | `AutoscaleScaleActionsLog` where `ResultType != 'Succeeded'` | any in 15 min | 2 |\n| **Scale set provisioning failed** | Activity Log - `Microsoft.Compute/virtualMachineScaleSets` write, status `Failed` | any | 1 |\n\n`enable_monitoring_alerts = true` in `terraform.tfvars` provisions the first five plus an email action group (`monitoring_alert_email`). The last two are documented for you to add against your own action group / Activity Log."
       },
       "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "alerts" } ]
     }
