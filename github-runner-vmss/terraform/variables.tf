@@ -160,13 +160,13 @@ variable "environment" {
 variable "queue_autoscale_min_instances" {
   description = "Floor for VMSS instance count. Autoscale never scales below this even at zero queue depth."
   type        = number
-  default     = 1
+  default     = 0
 }
 
 variable "queue_autoscale_max_instances" {
   description = "Ceiling for VMSS instance count regardless of queue depth."
   type        = number
-  default     = 10
+  default     = 2
 }
 
 variable "queue_autoscale_default_instances" {
