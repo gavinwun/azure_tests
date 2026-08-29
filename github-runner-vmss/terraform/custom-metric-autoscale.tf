@@ -88,3 +88,16 @@ resource "azurerm_role_assignment" "poller_metrics_publisher" {
   principal_id         = var.queue_poller_principal_id
   principal_type       = "ServicePrincipal"
 }
+
+# Reader on the management RG so poll-queue-depth.yml can look the VMSS up
+# by tag at run time (its metric POST needs the resource id + region) -
+# rather than pinning VMSS_RESOURCE_ID / VMSS_REGION repo variables that go
+# stale every time the scale set is recreated with a new random suffix.
+resource "azurerm_role_assignment" "poller_rg_reader" {
+  count = var.compute_backend == "vmss" && var.queue_poller_principal_id != "" ? 1 : 0
+
+  scope                = data.azurerm_resource_group.mgmt_devops.id
+  role_definition_name = "Reader"
+  principal_id         = var.queue_poller_principal_id
+  principal_type       = "ServicePrincipal"
+}

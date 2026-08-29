@@ -13,6 +13,7 @@
 #       + Contributor / RBAC-Admin / Blob / KV / hub-RG role assignments        [7]
 #   - AAD app "gh-runner-queue-poller"           + SP + fed cred   (--with-poller)     [B]
 #   - GitHub repo variables + secrets + deployment environment    (--set-github)       [3 / 7.4 / 7.5]
+#       (incl. RESOURCE_GROUP_NAME so the poller/reconcile workflows resolve the VMSS at run time)
 #       (--env-require-self-review also adds you as a required reviewer)
 #   - seeds the github-app-token Key Vault secret                 (--seed-token)       [4]
 #
@@ -543,6 +544,10 @@ if [[ "$SET_GITHUB" == "1" ]]; then
   gh_var AZURE_TENANT_ID        "$TENANT_ID"
   gh_var AZURE_SUBSCRIPTION_ID  "$SUBSCRIPTION_ID"
   gh_var KEYVAULT_NAME          "$KV_NAME"
+  # Used by poll-queue-depth.yml (resolves the VMSS by tag) and
+  # reconcile-aci-runners.yml. The workflows read the VMSS id / region at
+  # run time, so there's nothing post-apply to wire up.
+  gh_var RESOURCE_GROUP_NAME    "$MGMT_RG"
   gh_var AZURE_CLIENT_ID        "$REFRESH_APPID"
   gh_var TF_DEPLOY_AZURE_CLIENT_ID "$DEPLOY_APPID"
   gh_var TFSTATE_RESOURCE_GROUP "$TFSTATE_RG"

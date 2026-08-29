@@ -880,9 +880,12 @@ az ad sp show --id "$appId" --query id -o tsv
 | Name | Value |
 |---|---|
 | `QUEUE_POLLER_AZURE_CLIENT_ID` | App registration client ID from step B |
-| `VMSS_RESOURCE_ID` | output of `terraform output -raw vmss_id` |
-| `VMSS_REGION` | output of `terraform output -raw vmss_location`, e.g. `australiaeast` |
+| `RESOURCE_GROUP_NAME` | the management resource group. `poll-queue-depth.yml` resolves the VMSS id + region by tag from here at run time - no `VMSS_RESOURCE_ID` / `VMSS_REGION` to keep in sync. Set by `setup/bootstrap.sh --set-github`. (Optional overrides `VMSS_RESOURCE_ID` / `VMSS_REGION` still work if you set them.) |
 | `RUNNER_SCOPE` | `org` (default if unset) or `repo`. `repo` makes the poller count queued runs for this repo only, not org-wide. Set by `setup/bootstrap.sh --set-github`. The owner comes from `github.repository_owner` — there is no `GITHUB_ORG` variable (GitHub rejects the `GITHUB_` prefix). |
+
+The poller SP needs `Reader` on the management resource group for that
+lookup - Terraform grants it (`custom-metric-autoscale.tf`) when you set
+`queue_poller_principal_id` (step B).
 
 ### D. Apply and verify
 

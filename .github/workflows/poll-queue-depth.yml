@@ -70,12 +70,29 @@ jobs:
       - name: Publish custom metric to Azure Monitor
         env:
           VALUE: ${{ steps.queue-count.outputs.queued }}
-          VMSS_RESOURCE_ID: ${{ vars.VMSS_RESOURCE_ID }}     # from `terraform output vmss_id`
-          VMSS_REGION: ${{ vars.VMSS_REGION }}               # from `terraform output vmss_location`, e.g. "australiaeast"
+          RESOURCE_GROUP_NAME: ${{ vars.RESOURCE_GROUP_NAME }}
+          # Optional overrides. Leave the repo variables unset and the step
+          # resolves the VMSS (id + region) by tag - nothing to keep in sync
+          # when the scale set is recreated with a new name.
+          VMSS_RESOURCE_ID: ${{ vars.VMSS_RESOURCE_ID }}
+          VMSS_REGION: ${{ vars.VMSS_REGION }}
           METRIC_NAMESPACE: "GitHubActionsQueue"             # must match custom_metric_namespace in terraform.tfvars
           METRIC_NAME: "QueuedJobs"                          # must match custom_metric_name in terraform.tfvars
         run: |
           set -euo pipefail
+
+          # Resolve the VMSS if the override vars aren't set. Needs 'Reader'
+          # on the resource group for the poller SP - Terraform grants it
+          # (custom-metric-autoscale.tf) when queue_poller_principal_id is set.
+          if [ -z "${VMSS_RESOURCE_ID}" ] || [ -z "${VMSS_REGION}" ]; then
+            [ -n "${RESOURCE_GROUP_NAME}" ] || { echo "::error::RESOURCE_GROUP_NAME repo variable is not set (setup/bootstrap.sh --set-github sets it)"; exit 1; }
+            read -r VMSS_RESOURCE_ID VMSS_REGION < <(az vmss list -g "${RESOURCE_GROUP_NAME}" \
+              --query "[?tags.workload=='github-actions-self-hosted-runner'] | [0].[id,location]" -o tsv) || true
+          fi
+          if [ -z "${VMSS_RESOURCE_ID}" ] || [ -z "${VMSS_REGION}" ]; then
+            echo "::error::could not resolve the runner VMSS in resource group '${RESOURCE_GROUP_NAME}' - has 'terraform apply' run for the vmss backend?"
+            exit 1
+          fi
 
           # Audience must be exactly https://monitoring.azure.com/ (trailing slash required)
           TOKEN=$(az account get-access-token \
