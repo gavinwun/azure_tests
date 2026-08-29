@@ -12,6 +12,7 @@
     "GITHUB_OWNER": "gavinwun",
     "GITHUB_REPO": "gavinwun/azure_tests",
     "RUNNER_MATCH_LABELS": "self-hosted,vmss",
+    "RUNNER_NAME_PREFIX": "vmss-runner-",
 
     "VMSS_RESOURCE_ID": "/subscriptions/xxxx/resourceGroups/rg-mgmt-devops/providers/Microsoft.Compute/virtualMachineScaleSets/vmss-ghrunner-production-xxxx",
     "VMSS_REGION": "australiaeast",

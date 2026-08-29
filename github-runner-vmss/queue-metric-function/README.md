@@ -10,6 +10,7 @@ cron actually firing.
 |---|---|---|
 | `workflowJobWebhook` (HTTP) | GitHub `workflow_job` event for a job whose `runs-on` labels match `RUNNER_MATCH_LABELS` | HMAC-verifies the payload, then does an authoritative recount + publish - autoscale reacts in seconds |
 | `queueMetricTimer` (timer) | every 3 min | Same recount + publish - heartbeat / self-heal, and works with no webhook configured |
+| `cleanupOfflineRunners` (timer) | every hour | Deletes GitHub runner registrations that are `offline`, named `RUNNER_NAME_PREFIX*`, and have no matching live VMSS instance - so the runners list doesn't fill with stragglers from scale-in / manual deletes while GitHub waits out its 14-day offline auto-purge |
 
 Both call the same path: mint a GitHub App installation token from the
 private key in Key Vault (`github-app-private-key`, the same key the runners
@@ -72,6 +73,27 @@ npm start           # needs Azure Functions Core Tools v4 + `az login`
 
 `DefaultAzureCredential` uses your `az login` for the Key Vault read and the
 metric POST locally; in Azure it uses the Function's managed identity.
+
+## Logs
+
+Terraform provisions **Application Insights** (`appi-ghrunner-queue-<suffix>`,
+name in `terraform output -raw queue_metric_function_app_insights`) and wires
+`APPLICATIONINSIGHTS_CONNECTION_STRING` into the app, so every invocation and
+`context.log(...)` line is captured. Where to look:
+
+- **App Insights -> Live Metrics** - realtime while you trigger the webhook.
+- **App Insights -> Logs** (KQL):
+  ```kusto
+  traces     | where timestamp > ago(1h) | order by timestamp desc
+  requests   | where timestamp > ago(1h) | order by timestamp desc      // webhook calls
+  exceptions | where timestamp > ago(1h) | order by timestamp desc
+  ```
+- **Function App -> Functions -> `queueMetricTimer` / `workflowJobWebhook` -> Monitor** - per-function invocation list.
+- **Function App -> Log stream** - tail, once App Insights is connected.
+
+Data reuses the `enable_vmss_monitoring` Log Analytics workspace when there is
+one; otherwise a small dedicated workspace (`log-ghrunner-queue-<suffix>`) is
+created.
 
 ## App settings
 

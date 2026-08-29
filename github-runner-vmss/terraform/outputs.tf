@@ -53,6 +53,11 @@ output "queue_metric_function_webhook_url" {
   description = "GitHub webhook Payload URL - append ?code=<function key> (Function App -> Functions -> workflowJobWebhook -> Function Keys, or `az functionapp function keys list`)."
 }
 
+output "queue_metric_function_app_insights" {
+  value       = local.queue_fn_enabled ? azurerm_application_insights.queue_fn[0].name : null
+  description = "Application Insights for the Function's invocation logs. Portal -> this resource -> Logs (traces / requests) or Live Metrics; or Function App -> Functions -> Monitor."
+}
+
 #########################
 # ACI backend outputs
 #########################

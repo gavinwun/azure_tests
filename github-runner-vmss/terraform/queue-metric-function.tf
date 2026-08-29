@@ -20,6 +20,38 @@ locals {
   queue_fn_name         = "func-ghrunner-queue-${local.name_suffix}"
   queue_fn_plan_name    = "plan-ghrunner-queue-${local.name_suffix}"
   queue_fn_storage_name = substr(lower(replace("stqfn${random_string.suffix.result}", "-", "")), 0, 24)
+
+  # Application Insights for the Function's invocation logs / traces. Reuse
+  # the monitoring workspace when enable_vmss_monitoring created / referenced
+  # one; otherwise stand up a small dedicated workspace.
+  queue_fn_own_workspace = local.queue_fn_enabled && local.effective_log_analytics_workspace_id == null
+  queue_fn_workspace_id = (
+    local.effective_log_analytics_workspace_id != null
+    ? local.effective_log_analytics_workspace_id
+    : one(azurerm_log_analytics_workspace.queue_fn[*].id)
+  )
+}
+
+resource "azurerm_log_analytics_workspace" "queue_fn" {
+  count = local.queue_fn_own_workspace ? 1 : 0
+
+  name                = "log-ghrunner-queue-${local.name_suffix}"
+  location            = data.azurerm_resource_group.mgmt_devops.location
+  resource_group_name = data.azurerm_resource_group.mgmt_devops.name
+  sku                 = "PerGB2018"
+  retention_in_days   = 30
+  tags                = local.tags
+}
+
+resource "azurerm_application_insights" "queue_fn" {
+  count = local.queue_fn_enabled ? 1 : 0
+
+  name                = "appi-ghrunner-queue-${local.name_suffix}"
+  location            = data.azurerm_resource_group.mgmt_devops.location
+  resource_group_name = data.azurerm_resource_group.mgmt_devops.name
+  workspace_id        = local.queue_fn_workspace_id
+  application_type    = "Node.JS"
+  tags                = local.tags
 }
 
 resource "azurerm_service_plan" "queue_fn" {
@@ -82,7 +114,11 @@ resource "azurerm_function_app_flex_consumption" "queue_fn" {
     type = "SystemAssigned"
   }
 
-  site_config {}
+  site_config {
+    # Wires up APPLICATIONINSIGHTS_CONNECTION_STRING so the Functions host
+    # ships invocation logs / traces to App Insights (and the workspace).
+    application_insights_connection_string = azurerm_application_insights.queue_fn[0].connection_string
+  }
 
   app_settings = {
     GITHUB_APP_ID              = var.github_app_id
@@ -120,6 +156,17 @@ resource "azurerm_role_assignment" "queue_fn_kv_secrets_user" {
 
   scope                = data.azurerm_key_vault.mgmt_devops.id
   role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_function_app_flex_consumption.queue_fn[0].identity[0].principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# Reader on the VMSS so the hourly cleanup timer can list live instances and
+# tell an orphaned offline runner from one that's merely rebooting.
+resource "azurerm_role_assignment" "queue_fn_vmss_reader" {
+  count = local.queue_fn_enabled ? 1 : 0
+
+  scope                = azurerm_linux_virtual_machine_scale_set.vmss[0].id
+  role_definition_name = "Reader"
   principal_id         = azurerm_function_app_flex_consumption.queue_fn[0].identity[0].principal_id
   principal_type       = "ServicePrincipal"
 }

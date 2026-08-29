@@ -37,5 +37,9 @@ export function loadConfig() {
 
     // Empty => the webhook endpoint refuses every call (timer still works).
     webhookSecret: (process.env.GITHUB_WEBHOOK_SECRET || "").trim(),
+
+    // Offline-runner cleanup only touches registrations whose name starts
+    // with this (bootstrap_agent.sh names them "vmss-runner-<hostname>").
+    runnerNamePrefix: (process.env.RUNNER_NAME_PREFIX || "vmss-runner-").trim(),
   };
 }

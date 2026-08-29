@@ -120,6 +120,40 @@ export async function countQueuedJobs(cfg, token, log = () => {}) {
   return count;
 }
 
+// --- runner registrations ----------------------------------------------
+function runnersBase(cfg) {
+  return cfg.scope === "repo"
+    ? `${API}/repos/${cfg.repo}/actions/runners`
+    : `${API}/orgs/${cfg.owner}/actions/runners`;
+}
+
+export async function listRunners(cfg, token) {
+  const base = runnersBase(cfg);
+  const runners = [];
+  for (let page = 1; page <= 20; page++) {
+    const j = await gh(`${base}?per_page=100&page=${page}`, token);
+    const batch = j.runners || [];
+    runners.push(...batch);
+    if (batch.length < 100) break;
+  }
+  return runners;
+}
+
+export async function deleteRunner(cfg, token, id) {
+  const res = await fetch(`${runnersBase(cfg)}/${id}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "X-GitHub-Api-Version": "2022-11-28",
+      "User-Agent": "queue-metric-function",
+    },
+  });
+  if (!res.ok && res.status !== 404) {
+    throw new Error(`DELETE runner ${id} -> ${res.status} ${(await res.text().catch(() => "")).slice(0, 200)}`);
+  }
+}
+
 // --- webhook signature --------------------------------------------------
 export function verifySignature(secret, rawBody, signatureHeader) {
   if (!secret) return false;
