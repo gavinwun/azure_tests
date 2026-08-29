@@ -807,9 +807,63 @@ Once the private endpoint and self-hosted runners exist, applies that run
   VMSS uses `upgrade_mode = "Manual"`, instances already running when you
   first add this need a model upgrade (`az vmss update-instances`) or a
   roll before the agent lands.
+- **Dashboard**: with monitoring on, `monitoring-workbook.tf` also
+  deploys an Azure Monitor Workbook - the fleet operations dashboard
+  (fleet health, per-runner CPU/memory/disk, autoscale/capacity,
+  bootstrap provisioning, OS logs, alerts). Portal → Monitor →
+  Workbooks → *GitHub Actions runner fleet*. See
+  [Monitoring dashboard](#monitoring-dashboard-azure-monitor-workbook).
 - **GitHub side**: Org Settings → Actions → Runners - your VMSS instances
   should appear, named `vmss-runner-<hostname>`, with the labels set in
   `bootstrap_agent.sh` (`self-hosted, linux, x64, vmss`).
+
+---
+
+## Monitoring dashboard (Azure Monitor Workbook)
+
+With `enable_vmss_monitoring = true` (default), `monitoring-workbook.tf`
+deploys an SRE-style operations dashboard over the telemetry the Azure
+Monitor Agent already ships. It is the single pane of glass for running
+the fleet - built to be handed to a client as-is.
+
+**Open it**: Azure portal → **Monitor** → **Workbooks** → *GitHub Actions
+runner fleet - &lt;env&gt;*, or the fleet Log Analytics workspace →
+**Workbooks**. Terraform output `monitoring_workbook_id` is the resource ID.
+
+**Tabs**:
+
+| Tab | What it shows |
+|---|---|
+| Fleet overview | KPI tiles (runners online, bootstrap failures 24h, disk mounts over the warn threshold, OS errors 24h), runner count over time, per-runner state grid with CPU/memory/disk and colour thresholds |
+| Compute health | CPU / memory / disk / network per runner; a **low-disk-space grid** listing every mount at or over the warn threshold, Warning vs Critical |
+| Capacity & autoscale | Queued-jobs metric, instance count over time, autoscale **scale actions** and **evaluations** (why it did / didn't scale) |
+| Provisioning & bootstrap | Bootstrap outcome per instance (Completed / Failed / stuck), bootstrap error lines, the full `local0` log, Azure control-plane failures |
+| Logs & errors | Warning+ syslog by facility, top error sources, **OOM-killer** events, auth failures, raw syslog explorer |
+| Queue-metric function | Invocation success/failure, exceptions and traces for the optional Function App (empty unless `enable_queue_metric_function = true`) |
+| Alerts | Alerts fired against the fleet (last 24h) + a recommended alert-rule table |
+
+The workbook finds the workspace and scale set by the
+`workload = github-actions-self-hosted-runner` tag at open time, so a
+scale-set replacement doesn't break it. Colour thresholds are the
+`workbook_disk_warn_percent` / `workbook_disk_critical_percent` /
+`workbook_cpu_critical_percent` variables. Full reference:
+[`terraform/workbooks/README.md`](terraform/workbooks/README.md).
+
+### Alert rules (opt-in)
+
+The **Alerts** tab documents seven recommended rules. Set
+`enable_monitoring_alerts = true` and `monitoring_alert_email = "you@example.com"`
+to provision four of them - **low disk space**, **low memory**,
+**bootstrap failure**, **high CPU** - plus an email action group
+(`monitor-alerts.tf`). The other three (heartbeat-lost,
+autoscale-action-failed, provisioning-failed) are left as copy-paste
+KQL/criteria in the workbook, since heartbeat-lost is noisy for a
+scale-to-zero fleet and the others want an Activity Log alert on your
+own action group.
+
+The autoscale scale-action / evaluation grids need the autoscale
+setting's diagnostic logs in the workspace - `enable_autoscale_diagnostics`
+(default `true`) wires that up.
 
 ---
 

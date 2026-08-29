@@ -283,6 +283,64 @@ variable "vmss_perf_counter_sampling_seconds" {
   default     = 60
 }
 
+#########################################################################
+# Monitoring dashboard (Azure Monitor Workbook) + optional alert rules
+#########################################################################
+# The workbook (monitoring-workbook.tf) is an SRE-style operations
+# dashboard over the data AMA already ships: fleet health, per-runner
+# CPU/memory/disk/network, autoscale/capacity, bootstrap provisioning,
+# OS logs, and the queue-metric Function. vmss backend only, and only
+# when enable_vmss_monitoring is on. The alert rules (monitor-alerts.tf)
+# are opt-in and need an email target.
+
+variable "enable_monitoring_workbook" {
+  description = "Deploy the runner-fleet Azure Monitor Workbook (the operations dashboard). vmss backend only; ignored when enable_vmss_monitoring = false."
+  type        = bool
+  default     = true
+}
+
+variable "enable_autoscale_diagnostics" {
+  description = "Send the autoscale setting's evaluation + scale-action logs to the fleet Log Analytics workspace, so the workbook's Capacity tab can show why autoscale did or didn't act. Low volume; scoped to this deployment's own autoscale setting."
+  type        = bool
+  default     = true
+}
+
+variable "enable_monitoring_alerts" {
+  description = "Provision the recommended alert rules (low disk, low memory, bootstrap failure, high CPU) plus an email action group. Requires monitoring_alert_email. vmss backend only."
+  type        = bool
+  default     = false
+}
+
+variable "monitoring_alert_email" {
+  description = "Email address the alert action group notifies. Required when enable_monitoring_alerts = true."
+  type        = string
+  default     = ""
+}
+
+variable "workbook_disk_warn_percent" {
+  description = "Disk % used at which the workbook flags a mount amber."
+  type        = number
+  default     = 80
+}
+
+variable "workbook_disk_critical_percent" {
+  description = "Disk % used at which the workbook flags a mount red and (if enabled) the low-disk alert fires."
+  type        = number
+  default     = 90
+}
+
+variable "workbook_cpu_critical_percent" {
+  description = "Scale set average CPU % at which the workbook highlights and (if enabled) the high-CPU alert fires."
+  type        = number
+  default     = 90
+}
+
+variable "workbook_memory_low_mb" {
+  description = "Available memory (MB) below which (if enabled) the low-memory alert fires; also shown as guidance in the workbook."
+  type        = number
+  default     = 512
+}
+
 #########################
 # ACI backend
 #########################

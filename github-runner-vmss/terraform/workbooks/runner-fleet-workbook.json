@@ -1,0 +1,684 @@
+{
+  "version": "Notebook/1.0",
+  "isLocked": false,
+  "fallbackResourceIds": ["Azure Monitor"],
+  "items": [
+    {
+      "type": 1,
+      "name": "title",
+      "content": {
+        "json": "# GitHub Actions self-hosted runner fleet\n\nOperational dashboard for the Azure-hosted GitHub Actions runner fleet (VMSS backend). Pick a **time range**, the **Log Analytics workspace**, and the **scale set** below, then use the tabs to move between views.\n\n| Tab | What it answers |\n|---|---|\n| **Fleet overview** | Is the fleet healthy right now? How many runners, how busy, anything failing? |\n| **Compute health** | CPU / memory / disk / network per runner (utilisation & saturation). |\n| **Capacity & autoscale** | Queue depth, instance count over time, why autoscale did or didn't act. |\n| **Provisioning & bootstrap** | Did each instance finish `bootstrap_agent.sh` and register as a runner? |\n| **Logs & errors** | OS-level warnings/errors, out-of-memory kills, auth failures. |\n| **Queue-metric function** | Health of the optional Function App that publishes the autoscale metric. |\n| **Alerts** | Alerts firing against the fleet, plus the alert rules you should have. |"
+      }
+    },
+    {
+      "type": 9,
+      "name": "parameters",
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "p-time",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 14400000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 3600000 },
+                { "durationMs": 14400000 },
+                { "durationMs": 43200000 },
+                { "durationMs": 86400000 },
+                { "durationMs": 172800000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 }
+              ]
+            }
+          },
+          {
+            "id": "p-workspace",
+            "version": "KqlParameterItem/1.0",
+            "name": "Workspace",
+            "label": "Log Analytics workspace",
+            "type": 5,
+            "isRequired": true,
+            "query": "resources\n| where type =~ 'microsoft.operationalinsights/workspaces'\n| where tags['workload'] =~ '${workload_tag}' or name startswith 'log-ghrunner'\n| project value = id, label = name, selected = true",
+            "crossComponentResources": ["value::all"],
+            "queryType": 1,
+            "typeSettings": { "additionalResourceOptions": [], "showDefault": false }
+          },
+          {
+            "id": "p-fleet",
+            "version": "KqlParameterItem/1.0",
+            "name": "Fleet",
+            "label": "Scale set",
+            "type": 5,
+            "isRequired": true,
+            "query": "resources\n| where type =~ 'microsoft.compute/virtualmachinescalesets'\n| where tags['workload'] =~ '${workload_tag}' or name startswith 'vmss-ghrunner'\n| project value = id, label = name, selected = true",
+            "crossComponentResources": ["value::all"],
+            "queryType": 1,
+            "typeSettings": { "additionalResourceOptions": [], "showDefault": false }
+          },
+          {
+            "id": "p-diskwarn",
+            "version": "KqlParameterItem/1.0",
+            "name": "DiskWarn",
+            "label": "Disk warn %",
+            "type": 1,
+            "isRequired": true,
+            "value": "${disk_warn}"
+          },
+          {
+            "id": "p-diskcrit",
+            "version": "KqlParameterItem/1.0",
+            "name": "DiskCrit",
+            "label": "Disk critical %",
+            "type": 1,
+            "isRequired": true,
+            "value": "${disk_crit}"
+          },
+          {
+            "id": "p-cpucrit",
+            "version": "KqlParameterItem/1.0",
+            "name": "CpuCrit",
+            "label": "CPU critical %",
+            "type": 1,
+            "isRequired": true,
+            "value": "${cpu_crit}"
+          },
+          {
+            "id": "p-tab",
+            "version": "KqlParameterItem/1.0",
+            "name": "selectedTab",
+            "type": 1,
+            "isRequired": true,
+            "value": "overview",
+            "isHiddenWhenLocked": true
+          }
+        ],
+        "style": "pills",
+        "queryType": 1
+      }
+    },
+    {
+      "type": 11,
+      "name": "tabs",
+      "content": {
+        "version": "LinkItem/1.0",
+        "style": "tabs",
+        "links": [
+          { "id": "t-overview", "cellValue": "selectedTab", "linkTarget": "parameter", "linkLabel": "Fleet overview", "subTarget": "overview", "style": "link" },
+          { "id": "t-compute", "cellValue": "selectedTab", "linkTarget": "parameter", "linkLabel": "Compute health", "subTarget": "compute", "style": "link" },
+          { "id": "t-capacity", "cellValue": "selectedTab", "linkTarget": "parameter", "linkLabel": "Capacity & autoscale", "subTarget": "capacity", "style": "link" },
+          { "id": "t-prov", "cellValue": "selectedTab", "linkTarget": "parameter", "linkLabel": "Provisioning & bootstrap", "subTarget": "provisioning", "style": "link" },
+          { "id": "t-logs", "cellValue": "selectedTab", "linkTarget": "parameter", "linkLabel": "Logs & errors", "subTarget": "logs", "style": "link" },
+          { "id": "t-fn", "cellValue": "selectedTab", "linkTarget": "parameter", "linkLabel": "Queue-metric function", "subTarget": "function", "style": "link" },
+          { "id": "t-alerts", "cellValue": "selectedTab", "linkTarget": "parameter", "linkLabel": "Alerts", "subTarget": "alerts", "style": "link" }
+        ]
+      }
+    },
+
+    {
+      "type": 1,
+      "name": "ov-text",
+      "content": { "json": "## Fleet overview\nEverything on this tab is scoped to the last 24 hours (KPI tiles) or the selected time range (charts). \"Runner\" = a VMSS instance whose Azure Monitor Agent is reporting a heartbeat." },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "overview" } ]
+    },
+    {
+      "type": 3,
+      "name": "ov-kpi",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let prefix = '${computer_prefix}';\nlet online = toscalar(Heartbeat | where Computer startswith prefix | summarize dcountif(Computer, TimeGenerated > ago(10m)));\nlet total = toscalar(Heartbeat | where Computer startswith prefix | summarize dcount(Computer));\nlet bootFail = toscalar(Syslog | where TimeGenerated > ago(24h) | where Facility == 'local0' | where SyslogMessage has_cs 'ERROR' or SyslogMessage has_cs 'FATAL' or SyslogMessage has 'still failing after' | summarize dcount(Computer));\nlet diskHot = toscalar(Perf | where Computer startswith prefix | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | summarize arg_max(TimeGenerated, CounterValue) by Computer, InstanceName | summarize countif(CounterValue >= toreal('{DiskWarn}')));\nlet sysErr = toscalar(Syslog | where TimeGenerated > ago(24h) | where Computer startswith prefix | where SeverityLevel in ('err','error','crit','alert','emerg') | count);\nunion\n(print Metric = 'Runners online', Value = strcat(tostring(online), ' / ', tostring(total)), o = 1),\n(print Metric = 'Bootstrap failures (24h)', Value = tostring(bootFail), o = 2),\n(print Metric = 'Disk mounts at/over warn', Value = tostring(diskHot), o = 3),\n(print Metric = 'OS errors (24h)', Value = tostring(sysErr), o = 4)\n| sort by o asc | project Metric, Value",
+        "size": 3,
+        "timeContext": { "durationMs": 86400000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"],
+        "visualization": "tiles",
+        "tileSettings": {
+          "titleContent": { "columnMatch": "Metric", "formatter": 1 },
+          "leftContent": { "columnMatch": "Value", "formatter": 12, "formatOptions": { "palette": "auto" } },
+          "showBorder": true
+        }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "overview" } ]
+    },
+    {
+      "type": 3,
+      "name": "ov-fleetsize",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Heartbeat | where Computer startswith '${computer_prefix}' | summarize Runners = dcount(Computer) by bin(TimeGenerated, 5m) | render areachart",
+        "size": 0,
+        "title": "Runner count over time (heartbeat)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "overview" } ]
+    },
+    {
+      "type": 3,
+      "name": "ov-grid",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let prefix = '${computer_prefix}';\nlet hb = Heartbeat | where Computer startswith prefix | summarize LastHeartbeat = max(TimeGenerated) by Computer;\nlet perf = Perf | where Computer startswith prefix | where TimeGenerated > ago(15m)\n  | summarize CPU_pct = round(avgif(CounterValue, ObjectName == 'Processor' and CounterName == '% Processor Time'), 1),\n              Mem_used_pct = round(avgif(CounterValue, ObjectName == 'Memory' and CounterName == '% Used Memory'), 1),\n              Disk_used_pct = round(maxif(CounterValue, ObjectName == 'Logical Disk' and CounterName == '% Used Space'), 1)\n    by Computer;\nhb | join kind=leftouter perf on Computer\n| extend Status = iff(LastHeartbeat > ago(10m), 'Online', 'Stale')\n| project Computer, Status, LastHeartbeat, CPU_pct, Mem_used_pct, Disk_used_pct\n| sort by Computer asc",
+        "size": 0,
+        "title": "Runners - current state (last 15 min)",
+        "timeContext": { "durationMs": 86400000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "Status", "formatter": 18, "formatOptions": { "thresholdsOptions": "icons", "thresholdsGrid": [ { "operator": "==", "thresholdValue": "Online", "representation": "success", "text": "{0}{1}" }, { "operator": "Default", "thresholdValue": null, "representation": "2", "text": "{0}{1}" } ] } },
+            { "columnMatch": "LastHeartbeat", "formatter": 6 },
+            { "columnMatch": "CPU_pct", "formatter": 8, "formatOptions": { "palette": "yellowOrangeRed" }, "numberFormat": { "unit": 1, "options": { "style": "decimal", "maximumFractionDigits": 1 } } },
+            { "columnMatch": "Mem_used_pct", "formatter": 8, "formatOptions": { "palette": "yellowOrangeRed" }, "numberFormat": { "unit": 1, "options": { "style": "decimal", "maximumFractionDigits": 1 } } },
+            { "columnMatch": "Disk_used_pct", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [ { "operator": ">=", "thresholdValue": "{DiskCrit}", "representation": "redBright", "text": "{0}{1}" }, { "operator": ">=", "thresholdValue": "{DiskWarn}", "representation": "orange", "text": "{0}{1}" }, { "operator": "Default", "thresholdValue": null, "representation": "green", "text": "{0}{1}" } ] } }
+          ]
+        }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "overview" } ]
+    },
+
+    {
+      "type": 1,
+      "name": "cmp-text",
+      "content": { "json": "## Compute health\nPer-runner utilisation and saturation, sampled by the Azure Monitor Agent every 60s (`Perf` table). Watch for CPU pinned at 100% (jobs starved), `Available MBytes` trending to zero (OOM risk - see **Logs & errors**), or disk `% Used Space` climbing toward the thresholds." },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+    {
+      "type": 3,
+      "name": "cmp-cpu",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Processor' and CounterName == '% Processor Time' | summarize CPU_pct = avg(CounterValue) by bin(TimeGenerated, 5m), Computer | render timechart",
+        "size": 0,
+        "title": "CPU %  - average per runner",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+    {
+      "type": 3,
+      "name": "cmp-mem",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Memory' and CounterName == '% Used Memory' | summarize Mem_used_pct = avg(CounterValue) by bin(TimeGenerated, 5m), Computer | render timechart",
+        "size": 0,
+        "title": "Memory used %  - average per runner",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+    {
+      "type": 3,
+      "name": "cmp-memmb",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Memory' and CounterName == 'Available MBytes' | summarize Available_MB = min(CounterValue) by bin(TimeGenerated, 5m), Computer | render timechart",
+        "size": 0,
+        "title": "Available memory (MB)  - minimum per runner",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+    {
+      "type": 3,
+      "name": "cmp-disk",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | summarize Used_pct = max(CounterValue) by bin(TimeGenerated, 15m), Mount = strcat(Computer, ' ', InstanceName) | render timechart",
+        "size": 0,
+        "title": "Disk used %  - per mount",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+    {
+      "type": 3,
+      "name": "cmp-disklow",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | summarize arg_max(TimeGenerated, CounterValue) by Computer, InstanceName | extend Used_pct = round(CounterValue, 1) | where Used_pct >= toreal('{DiskWarn}') | extend Severity = iff(Used_pct >= toreal('{DiskCrit}'), 'Critical', 'Warning') | project Computer, Mount = InstanceName, Used_pct, Severity, TimeGenerated | sort by Used_pct desc",
+        "size": 0,
+        "title": "Low disk space - mounts at or over the warn threshold",
+        "timeContext": { "durationMs": 86400000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "Used_pct", "formatter": 8, "formatOptions": { "palette": "yellowOrangeRed" } },
+            { "columnMatch": "Severity", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [ { "operator": "==", "thresholdValue": "Critical", "representation": "redBright", "text": "{0}{1}" }, { "operator": "Default", "thresholdValue": null, "representation": "orange", "text": "{0}{1}" } ] } },
+            { "columnMatch": "TimeGenerated", "formatter": 6 }
+          ],
+          "labelSettings": [ { "columnId": "Used_pct", "label": "Used %" } ]
+        }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+    {
+      "type": 3,
+      "name": "cmp-diskio",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Logical Disk' and CounterName in ('Disk Read Bytes/sec', 'Disk Write Bytes/sec') | summarize Bytes_per_sec = avg(CounterValue) by bin(TimeGenerated, 5m), CounterName | render timechart",
+        "size": 0,
+        "title": "Disk throughput (bytes/sec)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+    {
+      "type": 3,
+      "name": "cmp-net",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Network' and CounterName in ('Total Bytes Received', 'Total Bytes Transmitted') | summarize Bytes_per_sec = avg(CounterValue) by bin(TimeGenerated, 5m), CounterName | render timechart",
+        "size": 0,
+        "title": "Network throughput (bytes/sec)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "compute" } ]
+    },
+
+    {
+      "type": 1,
+      "name": "cap-text",
+      "content": { "json": "## Capacity & autoscale\nThe fleet scales on **queued GitHub jobs** (the `${custom_metric_name}` custom metric in the `${custom_metric_namespace}` namespace on the scale set). Autoscale adds an instance per queued job and drains to the floor when the queue is quiet.\n\n> The scale-action and evaluation grids need diagnostic logs from the autoscale setting flowing to this workspace (`enable_autoscale_diagnostics = true` in Terraform). If they are empty, that setting is off." },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "capacity" } ]
+    },
+    {
+      "type": 10,
+      "name": "cap-queued",
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachinescalesets",
+        "metricScope": 0,
+        "resourceIds": ["{Fleet}"],
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "metrics": [
+          { "namespace": "${custom_metric_namespace}", "metric": "${custom_metric_namespace}--${custom_metric_name}", "aggregation": 4, "columnName": "Queued jobs" }
+        ],
+        "title": "Queued jobs (autoscale metric)",
+        "gridSettings": { "rowLimit": 10000 }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "capacity" } ]
+    },
+    {
+      "type": 10,
+      "name": "cap-cpu",
+      "content": {
+        "version": "MetricsItem/2.0",
+        "size": 0,
+        "chartType": 2,
+        "resourceType": "microsoft.compute/virtualmachinescalesets",
+        "metricScope": 0,
+        "resourceIds": ["{Fleet}"],
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "metrics": [
+          { "namespace": "microsoft.compute/virtualmachinescalesets", "metric": "microsoft.compute/virtualmachinescalesets--Percentage CPU", "aggregation": 4, "columnName": "CPU %" }
+        ],
+        "title": "Scale set Percentage CPU (platform metric)",
+        "gridSettings": { "rowLimit": 10000 }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "capacity" } ]
+    },
+    {
+      "type": 3,
+      "name": "cap-fleetsize",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Heartbeat | where Computer startswith '${computer_prefix}' | summarize Runners = dcount(Computer) by bin(TimeGenerated, 15m) | render columnchart",
+        "size": 0,
+        "title": "Runner count over time (heartbeat proxy for capacity)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "capacity" } ]
+    },
+    {
+      "type": 3,
+      "name": "cap-scaleactions",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics | where Category == 'AutoscaleScaleActionsLog' | sort by TimeGenerated desc | take 200",
+        "size": 0,
+        "title": "Autoscale - scale actions",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "capacity" } ]
+    },
+    {
+      "type": 3,
+      "name": "cap-scaleeval",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureDiagnostics | where Category == 'AutoscaleEvaluations' | sort by TimeGenerated desc | take 200",
+        "size": 0,
+        "title": "Autoscale - evaluations (why it did / didn't scale)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "capacity" } ]
+    },
+
+    {
+      "type": 1,
+      "name": "prov-text",
+      "content": { "json": "## Provisioning & bootstrap\nAt first boot each instance runs `bootstrap_agent.sh`, which logs to **syslog facility `local0`** (tag `ghrunner-bootstrap`) - shipped here by the Data Collection Rule. A healthy instance logs `Bootstrap complete ... registered and running.` An instance that heartbeats but never logs that line is stuck part-way through provisioning." },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "provisioning" } ]
+    },
+    {
+      "type": 3,
+      "name": "prov-status",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let prefix = '${computer_prefix}';\nSyslog | where Facility == 'local0' | where Computer startswith prefix\n| summarize FirstLog = min(TimeGenerated), LastLog = max(TimeGenerated),\n            Completed = countif(SyslogMessage has 'Bootstrap complete'),\n            Errors = countif(SyslogMessage has_cs 'ERROR' or SyslogMessage has_cs 'FATAL' or SyslogMessage has 'still failing after')\n  by Computer\n| extend Status = case(Completed > 0, 'Completed', Errors > 0, 'Failed', 'In progress / unknown')\n| project Computer, Status, Errors, FirstLog, LastLog\n| sort by LastLog desc",
+        "size": 0,
+        "title": "Bootstrap outcome per instance",
+        "timeContext": { "durationMs": 259200000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "Status", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [ { "operator": "==", "thresholdValue": "Completed", "representation": "green", "text": "{0}{1}" }, { "operator": "==", "thresholdValue": "Failed", "representation": "redBright", "text": "{0}{1}" }, { "operator": "Default", "thresholdValue": null, "representation": "orange", "text": "{0}{1}" } ] } },
+            { "columnMatch": "FirstLog", "formatter": 6 },
+            { "columnMatch": "LastLog", "formatter": 6 }
+          ]
+        }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "provisioning" } ]
+    },
+    {
+      "type": 3,
+      "name": "prov-stuck",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "let prefix = '${computer_prefix}';\nlet done = Syslog | where Facility == 'local0' and SyslogMessage has 'Bootstrap complete' | distinct Computer;\nHeartbeat | where Computer startswith prefix | summarize LastSeen = max(TimeGenerated) by Computer\n| where Computer !in (done)\n| extend Note = 'Instance is up and the agent reports, but bootstrap never logged completion'\n| project Computer, LastSeen, Note | sort by LastSeen desc",
+        "size": 0,
+        "title": "Instances stuck in provisioning (heartbeat, no completed bootstrap)",
+        "timeContext": { "durationMs": 259200000 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "provisioning" } ]
+    },
+    {
+      "type": 3,
+      "name": "prov-errlines",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Syslog | where Facility == 'local0' | where Computer startswith '${computer_prefix}' | where SyslogMessage has_cs 'ERROR' or SyslogMessage has_cs 'FATAL' or SyslogMessage has_cs 'WARN' or SyslogMessage has 'failed' | project TimeGenerated, Computer, SyslogMessage | sort by TimeGenerated desc",
+        "size": 0,
+        "title": "Bootstrap error / warning lines",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "provisioning" } ]
+    },
+    {
+      "type": 3,
+      "name": "prov-full",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Syslog | where Facility == 'local0' | where Computer startswith '${computer_prefix}' | project TimeGenerated, Computer, ProcessName, SyslogMessage | sort by TimeGenerated desc | take 1000",
+        "size": 0,
+        "title": "Full bootstrap log (facility local0)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "provisioning" } ]
+    },
+    {
+      "type": 3,
+      "name": "prov-activity",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AzureActivity | where ResourceProvider =~ 'Microsoft.Compute' | where ActivityStatusValue in ('Failure', 'Failed') | project TimeGenerated, OperationNameValue, ActivityStatusValue, Caller, _ResourceId | sort by TimeGenerated desc | take 200",
+        "size": 0,
+        "title": "Azure control-plane failures (needs Activity Log -> this workspace)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "provisioning" } ]
+    },
+
+    {
+      "type": 1,
+      "name": "log-text",
+      "content": { "json": "## Logs & errors\nOS-level syslog from every runner (the DCR collects `auth`, `authpriv`, `cron`, `daemon`, `kern`, `syslog`, `user` at Warning and above). Use this to catch the failure modes that don't show up as a metric: the kernel OOM-killer reaping a job, SSH brute-force noise, cron failures." },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "logs" } ]
+    },
+    {
+      "type": 3,
+      "name": "log-volume",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Syslog | where Computer startswith '${computer_prefix}' | where SeverityLevel in ('warning', 'err', 'error', 'crit', 'alert', 'emerg') | summarize Events = count() by bin(TimeGenerated, 15m), Facility | render timechart",
+        "size": 0,
+        "title": "Warning+ syslog volume by facility",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "logs" } ]
+    },
+    {
+      "type": 3,
+      "name": "log-top",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Syslog | where Computer startswith '${computer_prefix}' | where SeverityLevel in ('err', 'error', 'crit', 'alert', 'emerg') | summarize Count = count(), LastSeen = max(TimeGenerated), Example = any(SyslogMessage) by ProcessName, Facility | sort by Count desc",
+        "size": 0,
+        "title": "Top error sources",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"],
+        "gridSettings": { "formatters": [ { "columnMatch": "LastSeen", "formatter": 6 }, { "columnMatch": "Count", "formatter": 4 } ] }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "logs" } ]
+    },
+    {
+      "type": 3,
+      "name": "log-oom",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Syslog | where Computer startswith '${computer_prefix}' | where SyslogMessage has 'Out of memory' or SyslogMessage has 'oom-kill' or SyslogMessage has 'oom_reaper' or SyslogMessage has 'Killed process' | project TimeGenerated, Computer, SyslogMessage | sort by TimeGenerated desc",
+        "size": 0,
+        "title": "Out-of-memory killer events",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "logs" } ]
+    },
+    {
+      "type": 3,
+      "name": "log-auth",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Syslog | where Computer startswith '${computer_prefix}' | where Facility in ('auth', 'authpriv') | where SyslogMessage has 'Failed password' or SyslogMessage has 'authentication failure' or SyslogMessage has 'invalid user' | summarize Attempts = count(), LastSeen = max(TimeGenerated) by Computer | sort by Attempts desc",
+        "size": 0,
+        "title": "Authentication failures",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "logs" } ]
+    },
+    {
+      "type": 3,
+      "name": "log-raw",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "Syslog | where Computer startswith '${computer_prefix}' | project TimeGenerated, Computer, Facility, SeverityLevel, ProcessName, SyslogMessage | sort by TimeGenerated desc | take 500",
+        "size": 0,
+        "title": "Syslog explorer (latest 500)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "logs" } ]
+    },
+
+    {
+      "type": 1,
+      "name": "fn-text",
+      "content": { "json": "## Queue-metric function\nOnly populated when the optional Function App is deployed (`enable_queue_metric_function = true`). It publishes the `${custom_metric_name}` autoscale metric from a GitHub `workflow_job` webhook plus a 3-minute timer, and runs an hourly cleanup of orphaned runner registrations. Data comes from its workspace-based Application Insights (`App*` tables)." },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "function" } ]
+    },
+    {
+      "type": 3,
+      "name": "fn-invocations",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppRequests | where AppRoleName startswith '${queue_fn_role_prefix}' | summarize Total = count(), Failed = countif(Success == false) by bin(TimeGenerated, 30m), Name | render columnchart",
+        "size": 0,
+        "title": "Function invocations (success vs failed)",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "function" } ]
+    },
+    {
+      "type": 3,
+      "name": "fn-exceptions",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppExceptions | where AppRoleName startswith '${queue_fn_role_prefix}' | project TimeGenerated, ProblemId, OuterMessage, OperationName | sort by TimeGenerated desc | take 200",
+        "size": 0,
+        "title": "Function exceptions",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "function" } ]
+    },
+    {
+      "type": 3,
+      "name": "fn-metric",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "AppTraces | where AppRoleName startswith '${queue_fn_role_prefix}' | where Message has '${custom_metric_name}' or Message has 'metric' or Message has 'Published' | project TimeGenerated, Message, SeverityLevel | sort by TimeGenerated desc | take 200",
+        "size": 0,
+        "title": "Metric-publish and cleanup traces",
+        "timeContextFromParameter": "TimeRange",
+        "timeContext": { "durationMs": 0 },
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "crossComponentResources": ["{Workspace}"]
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "function" } ]
+    },
+
+    {
+      "type": 1,
+      "name": "al-text",
+      "content": { "json": "## Alerts\nAlerts currently firing against the fleet (Azure Monitor, last 24h). If this is empty and you expected coverage, the rules below are not created yet - set `enable_monitoring_alerts = true` (and `monitoring_alert_email`) in Terraform, or create them by hand." },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "alerts" } ]
+    },
+    {
+      "type": 3,
+      "name": "al-fired",
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "alertsmanagementresources\n| where type =~ 'microsoft.alertsmanagement/alerts'\n| extend e = parse_json(properties).essentials\n| extend Fired = todatetime(e.startDateTime), Severity = tostring(e.severity), State = tostring(e.alertState), Rule = tostring(e.alertRule), Target = tostring(e.targetResource)\n| where Fired > ago(24h)\n| where Target contains 'ghrunner'\n| project Fired, name, Severity, State, Rule, Target\n| sort by Fired desc",
+        "size": 0,
+        "title": "Fired alerts (last 24h)",
+        "queryType": 1,
+        "resourceType": "microsoft.resourcegraph/resources",
+        "crossComponentResources": ["value::all"],
+        "visualization": "table",
+        "gridSettings": {
+          "formatters": [
+            { "columnMatch": "Fired", "formatter": 6 },
+            { "columnMatch": "Severity", "formatter": 18, "formatOptions": { "thresholdsOptions": "colors", "thresholdsGrid": [ { "operator": "==", "thresholdValue": "Sev0", "representation": "redBright", "text": "{0}{1}" }, { "operator": "==", "thresholdValue": "Sev1", "representation": "orange", "text": "{0}{1}" }, { "operator": "==", "thresholdValue": "Sev2", "representation": "yellow", "text": "{0}{1}" }, { "operator": "Default", "thresholdValue": null, "representation": "blue", "text": "{0}{1}" } ] } }
+          ]
+        }
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "alerts" } ]
+    },
+    {
+      "type": 1,
+      "name": "al-recommended",
+      "content": {
+        "json": "### Recommended alert rules\n\n| Alert | Signal | Condition | Severity |\n|---|---|---|---|\n| **Low disk space** | `Perf` - `Logical Disk` / `% Used Space`, split by `Computer` | `>= {DiskCrit}` for 15 min | 2 (warning at `>= {DiskWarn}`) |\n| **High CPU** | Scale set metric `Percentage CPU` | `> {CpuCrit}` avg over 15 min | 3 |\n| **Low memory** | `Perf` - `Memory` / `Available MBytes`, split by `Computer` | `< ${mem_low_mb}` for 15 min | 3 |\n| **Bootstrap failure** | `Syslog` `Facility == 'local0'` with `ERROR` / `FATAL` | any in 10 min | 1 |\n| **Runner heartbeat lost** | `Heartbeat`, split by `Computer` | no beat for 15 min while any instance is expected | 2 |\n| **Autoscale action failed** | `AzureDiagnostics` `Category == 'AutoscaleScaleActionsLog'` result not `Succeeded` | any in 15 min | 2 |\n| **Scale set provisioning failed** | Activity Log - `Microsoft.Compute/virtualMachineScaleSets` write, status `Failed` | any | 1 |\n\n`enable_monitoring_alerts = true` in `terraform.tfvars` provisions the first five plus an email action group (`monitoring_alert_email`). The last two are documented for you to add against your own action group / Activity Log."
+      },
+      "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "alerts" } ]
+    }
+  ]
+}

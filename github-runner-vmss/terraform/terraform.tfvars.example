@@ -50,6 +50,18 @@ log_analytics_workspace_id = ""
 # log_analytics_retention_days        = 30
 # vmss_perf_counter_sampling_seconds  = 60
 
+# Operations dashboard (Azure Monitor Workbook) + optional alert rules.
+# The workbook is on by default whenever monitoring is on. The alert
+# rules are opt-in and need an email target.
+# enable_monitoring_workbook     = true
+# enable_autoscale_diagnostics   = true
+# enable_monitoring_alerts       = false
+# monitoring_alert_email         = "sre@example.com"   # required if enable_monitoring_alerts = true
+# workbook_disk_warn_percent     = 80
+# workbook_disk_critical_percent = 90
+# workbook_cpu_critical_percent  = 90
+# workbook_memory_low_mb         = 512
+
 # Object (principal) id of the gh-runner-queue-poller SP (optional section B).
 # Set it and Terraform grants 'Monitoring Metrics Publisher' on the VMSS so
 # poll-queue-depth.yml can publish the autoscale metric - replaces the manual

@@ -43,6 +43,16 @@ output "vmss_data_collection_rule_id" {
   description = "The DCR bound to the scale set. Query bootstrap output in the workspace with: Syslog | where Facility == \"local0\""
 }
 
+output "monitoring_workbook_id" {
+  value       = local.monitoring_workbook_enabled ? azurerm_application_insights_workbook.runner_fleet[0].id : null
+  description = "Resource ID of the runner-fleet operations Workbook. Open it in the portal under Azure Monitor -> Workbooks, or in the fleet Log Analytics workspace -> Workbooks."
+}
+
+output "monitoring_alerts_action_group_id" {
+  value       = local.monitoring_alerts_enabled ? azurerm_monitor_action_group.runner_ops[0].id : null
+  description = "Action group the opt-in alert rules notify. Null unless enable_monitoring_alerts = true."
+}
+
 output "queue_metric_function_name" {
   value       = local.queue_fn_enabled ? azurerm_function_app_flex_consumption.queue_fn[0].name : null
   description = "Deploy target for .github/workflows/deploy-queue-metric-function.yml."
