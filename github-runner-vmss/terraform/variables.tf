@@ -189,7 +189,7 @@ variable "scale_in_grace_period" {
 variable "queue_autoscale_default_instances" {
   description = "Initial instance count on first create. Terraform ignores drift from this afterwards (see lifecycle block in main.tf) - Azure Monitor owns the live count."
   type        = number
-  default     = 1
+  default     = 0
 }
 
 variable "custom_metric_namespace" {
@@ -227,7 +227,7 @@ variable "runner_match_labels" {
 #########################################################################
 
 variable "enable_queue_metric_function" {
-  description = "Deploy the Consumption-plan Function App that publishes the QueuedJobs autoscale metric from a GitHub workflow_job webhook + a 3-min timer. An alternative to the poll-queue-depth.yml scheduled workflow that doesn't depend on GitHub's cron firing. vmss backend only."
+  description = "Deploy the Flex Consumption Function App (Node 22) that publishes the QueuedJobs autoscale metric from a GitHub workflow_job webhook + a 3-min timer. An alternative to the poll-queue-depth.yml scheduled workflow that doesn't depend on GitHub's cron firing. vmss backend only."
   type        = bool
   default     = false
 }

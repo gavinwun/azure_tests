@@ -1,10 +1,10 @@
 name: Deploy Queue-Metric Function
 
 # Builds and deploys github-runner-vmss/queue-metric-function to the
-# Consumption Function App provisioned by queue-metric-function.tf.
-# Run `terraform apply` with enable_queue_metric_function = true first,
-# then set the QUEUE_METRIC_FUNCTION_NAME repo variable from the output:
-#   terraform output -raw queue_metric_function_name
+# Flex Consumption Function App provisioned by queue-metric-function.tf.
+# Run `terraform apply` with enable_queue_metric_function = true first;
+# the app name is resolved from the RESOURCE_GROUP_NAME repo variable
+# (override with QUEUE_METRIC_FUNCTION_NAME).
 
 on:
   push:
@@ -33,7 +33,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: Install production dependencies
         working-directory: ${{ env.FUNC_DIR }}
@@ -71,6 +71,6 @@ jobs:
         with:
           app-name: ${{ steps.fn.outputs.name }}
           package: ${{ env.FUNC_DIR }}
+          sku: flexconsumption
           respect-funcignore: true
-          scm-do-build-during-deployment: false
-          enable-oryx-build: false
+          remote-build: false

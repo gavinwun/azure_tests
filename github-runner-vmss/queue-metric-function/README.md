@@ -1,9 +1,10 @@
 # queue-metric-function
 
-A Consumption-plan Azure Function that publishes the **`QueuedJobs`** custom
-metric on the VMSS - the signal `custom-metric-autoscale.tf` scales on. It is
-an alternative to the `poll-queue-depth.yml` scheduled workflow that does not
-depend on GitHub's cron actually firing.
+A **Flex Consumption** Azure Function (Node 22) that publishes the
+**`QueuedJobs`** custom metric on the VMSS - the signal
+`custom-metric-autoscale.tf` scales on. It is an alternative to the
+`poll-queue-depth.yml` scheduled workflow that does not depend on GitHub's
+cron actually firing.
 
 | Trigger | When | What it does |
 |---|---|---|
@@ -89,6 +90,15 @@ metric POST locally; in Azure it uses the Function's managed identity.
 
 ## Cost
 
-Consumption (Y1): 1M executions + 400k GB-s free per month. A `workflow_job`
-webhook plus a 3-min timer stays inside the free grant - effectively $0 plus
-a few cents of storage.
+Flex Consumption bills on-demand from the first execution - it does **not**
+carry the 1M-execution / 400k GB-s monthly free grant that the retiring Linux
+Consumption plan had. For this workload (a `workflow_job` webhook + a 3-min
+timer = ~15k sub-second executions/month at 2 GB, scale-to-zero when idle)
+that works out to roughly a few cents to ~USD 1/month, plus a few cents of
+storage.
+
+If the literal free grant matters more than being off the deprecated plan,
+Linux Consumption is supported until 2028 - swap `sku_name = "FC1"` back to
+`"Y1"`, `azurerm_function_app_flex_consumption` back to
+`azurerm_linux_function_app` with `WEBSITE_RUN_FROM_PACKAGE = "1"`, and drop
+the `deployments` container.

@@ -4,7 +4,7 @@
   "description": "Publishes the GitHub Actions queued-job count (filtered to self-hosted runner labels) as an Azure Monitor custom metric that drives VMSS autoscale. Webhook + timer.",
   "type": "module",
   "main": "src/functions/*.js",
-  "engines": { "node": ">=20" },
+  "engines": { "node": ">=22" },
   "scripts": {
     "start": "func start"
   },

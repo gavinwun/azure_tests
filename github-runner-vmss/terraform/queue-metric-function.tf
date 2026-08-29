@@ -1,14 +1,15 @@
 #####################################################################
 # Queue-depth metric Function App - vmss backend, opt-in.
 #
-# Replaces / backs up poll-queue-depth.yml. A Consumption-plan Function
-# (effectively free at webhook volume) that:
+# Replaces / backs up poll-queue-depth.yml. A Flex Consumption Function
+# (scale-to-zero, pay-per-use) that:
 #   * on a GitHub `workflow_job` webhook for a matching job, and
 #   * on a 3-minute timer (heartbeat / self-heal),
 # counts QUEUED jobs whose runs-on labels match runner_match_labels and
 # POSTs the count as the QueuedJobs custom metric on the VMSS - the same
 # signal custom-metric-autoscale.tf reads.
 #
+# Flex Consumption (not Linux Consumption, retiring 2028) + Node 22.
 # Code lives in ../queue-metric-function; deploy it with
 # .github/workflows/deploy-queue-metric-function.yml after `terraform apply`.
 #####################################################################
@@ -19,6 +20,17 @@ locals {
   queue_fn_name         = "func-ghrunner-queue-${local.name_suffix}"
   queue_fn_plan_name    = "plan-ghrunner-queue-${local.name_suffix}"
   queue_fn_storage_name = substr(lower(replace("stqfn${random_string.suffix.result}", "-", "")), 0, 24)
+}
+
+resource "azurerm_service_plan" "queue_fn" {
+  count = local.queue_fn_enabled ? 1 : 0
+
+  name                = local.queue_fn_plan_name
+  resource_group_name = data.azurerm_resource_group.mgmt_devops.name
+  location            = data.azurerm_resource_group.mgmt_devops.location
+  os_type             = "Linux"
+  sku_name            = "FC1" # Flex Consumption
+  tags                = local.tags
 }
 
 resource "azurerm_storage_account" "queue_fn" {
@@ -34,18 +46,17 @@ resource "azurerm_storage_account" "queue_fn" {
   tags                            = local.tags
 }
 
-resource "azurerm_service_plan" "queue_fn" {
+# Flex Consumption deploys the app package into a blob container rather
+# than the RUN_FROM_PACKAGE app setting used on the old plan.
+resource "azurerm_storage_container" "queue_fn_deploy" {
   count = local.queue_fn_enabled ? 1 : 0
 
-  name                = local.queue_fn_plan_name
-  resource_group_name = data.azurerm_resource_group.mgmt_devops.name
-  location            = data.azurerm_resource_group.mgmt_devops.location
-  os_type             = "Linux"
-  sku_name            = "Y1" # Consumption
-  tags                = local.tags
+  name                  = "deployments"
+  storage_account_id    = azurerm_storage_account.queue_fn[0].id
+  container_access_type = "private"
 }
 
-resource "azurerm_linux_function_app" "queue_fn" {
+resource "azurerm_function_app_flex_consumption" "queue_fn" {
   count = local.queue_fn_enabled ? 1 : 0
 
   name                = local.queue_fn_name
@@ -54,24 +65,26 @@ resource "azurerm_linux_function_app" "queue_fn" {
   service_plan_id     = azurerm_service_plan.queue_fn[0].id
   tags                = local.tags
 
-  functions_extension_version = "~4"
+  storage_container_type      = "blobContainer"
+  storage_container_endpoint  = "${azurerm_storage_account.queue_fn[0].primary_blob_endpoint}${azurerm_storage_container.queue_fn_deploy[0].name}"
+  storage_authentication_type = "StorageAccountConnectionString"
+  storage_access_key          = azurerm_storage_account.queue_fn[0].primary_access_key
 
-  storage_account_name       = azurerm_storage_account.queue_fn[0].name
-  storage_account_access_key = azurerm_storage_account.queue_fn[0].primary_access_key
+  runtime_name    = "node"
+  runtime_version = "22"
+
+  # Smallest footprint - this is a webhook + a 3-min timer. No always-ready
+  # instances => scales to zero when idle.
+  maximum_instance_count = 40
+  instance_memory_in_mb  = 2048
 
   identity {
     type = "SystemAssigned"
   }
 
-  site_config {
-    application_stack {
-      node_version = "20"
-    }
-  }
+  site_config {}
 
   app_settings = {
-    WEBSITE_RUN_FROM_PACKAGE = "1"
-
     GITHUB_APP_ID              = var.github_app_id
     KEY_VAULT_URI              = data.azurerm_key_vault.mgmt_devops.vault_uri
     GITHUB_APP_KEY_SECRET_NAME = "github-app-private-key"
@@ -90,11 +103,6 @@ resource "azurerm_linux_function_app" "queue_fn" {
     # Set it here (or in the portal) to the same value as the GitHub webhook.
     GITHUB_WEBHOOK_SECRET = var.github_webhook_secret
   }
-
-  lifecycle {
-    # The deploy workflow updates the running package out-of-band.
-    ignore_changes = [app_settings["WEBSITE_RUN_FROM_PACKAGE"]]
-  }
 }
 
 # --- Function identity: publish the metric, read the App private key ---
@@ -103,7 +111,7 @@ resource "azurerm_role_assignment" "queue_fn_metrics_publisher" {
 
   scope                = azurerm_linux_virtual_machine_scale_set.vmss[0].id
   role_definition_name = "Monitoring Metrics Publisher"
-  principal_id         = azurerm_linux_function_app.queue_fn[0].identity[0].principal_id
+  principal_id         = azurerm_function_app_flex_consumption.queue_fn[0].identity[0].principal_id
   principal_type       = "ServicePrincipal"
 }
 
@@ -112,6 +120,6 @@ resource "azurerm_role_assignment" "queue_fn_kv_secrets_user" {
 
   scope                = data.azurerm_key_vault.mgmt_devops.id
   role_definition_name = "Key Vault Secrets User"
-  principal_id         = azurerm_linux_function_app.queue_fn[0].identity[0].principal_id
+  principal_id         = azurerm_function_app_flex_consumption.queue_fn[0].identity[0].principal_id
   principal_type       = "ServicePrincipal"
 }
