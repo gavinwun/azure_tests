@@ -86,8 +86,10 @@ jobs:
           # (custom-metric-autoscale.tf) when queue_poller_principal_id is set.
           if [ -z "${VMSS_RESOURCE_ID}" ] || [ -z "${VMSS_REGION}" ]; then
             [ -n "${RESOURCE_GROUP_NAME}" ] || { echo "::error::RESOURCE_GROUP_NAME repo variable is not set (setup/bootstrap.sh --set-github sets it)"; exit 1; }
+            # object projection (not [id,location]) so -o tsv renders ONE
+            # tab-separated line for `read` - an array prints one per line.
             read -r VMSS_RESOURCE_ID VMSS_REGION < <(az vmss list -g "${RESOURCE_GROUP_NAME}" \
-              --query "[?tags.workload=='github-actions-self-hosted-runner'] | [0].[id,location]" -o tsv) || true
+              --query "[?tags.workload=='github-actions-self-hosted-runner'] | [0].{id:id,location:location}" -o tsv) || true
           fi
           if [ -z "${VMSS_RESOURCE_ID}" ] || [ -z "${VMSS_REGION}" ]; then
             echo "::error::could not resolve the runner VMSS in resource group '${RESOURCE_GROUP_NAME}' - has 'terraform apply' run for the vmss backend?"
