@@ -128,7 +128,7 @@ resource "azurerm_virtual_machine_scale_set_extension" "ama" {
   virtual_machine_scale_set_id = azurerm_linux_virtual_machine_scale_set.vmss[0].id
   publisher                    = "Microsoft.Azure.Monitor"
   type                         = "AzureMonitorLinuxAgent"
-  type_handler_version         = "1.33"
+  type_handler_version         = "1.43"
   auto_upgrade_minor_version   = true
   automatic_upgrade_enabled    = true
 
