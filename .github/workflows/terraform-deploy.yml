@@ -132,26 +132,45 @@ jobs:
         id: runnerip
         run: echo "ip=$(curl -fsS https://api.ipify.org)" >> "$GITHUB_OUTPUT"
 
-      # Open the storage firewall in a targeted apply first. A -target apply
-      # only refreshes the account (and its deps), NOT the private blob - a
-      # full apply here would try to HEAD bootstrap_agent.sh over the public
-      # endpoint that is still disabled at refresh time and 403. Once the
-      # account is reachable, the untargeted apply below uploads the script.
-      - name: Terraform Apply (open storage firewall only)
+      # Targeted apply first, for two separate propagation delays that a
+      # single full apply would race:
+      #   1. Storage firewall: the account comes up deny-all; opening it to
+      #      this runner's IP takes ~15-30s to take effect on the data plane.
+      #   2. Blob-data-plane RBAC: bootstrap_agent.sh is uploaded with an
+      #      AAD token (shared_access_key_enabled = false). A freshly created
+      #      "Storage Blob Data Contributor" assignment returns 403 for the
+      #      first few minutes. time_sleep.blob_rbac_lag holds here until it
+      #      is effective, so the untargeted apply below can upload straight
+      #      away. A -target apply touches only these, never the blob itself.
+      - name: Terraform Apply (open firewall + wait out blob RBAC)
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
           terraform apply -auto-approve -input=false -var-file="terraform.tfvars" \
             -target=azurerm_storage_account.bootstrap \
+            -target=azurerm_role_assignment.pipeline_blob_contributor \
+            -target=time_sleep.blob_rbac_lag \
             -var="bootstrap_storage_public_network_access_enabled=true" \
             -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'
-          sleep 30   # let the firewall change propagate on the data plane
+          sleep 15   # final margin for the firewall change on the data plane
 
-      - name: Terraform Apply (storage public endpoint open for script upload)
+      # Retried: even with the wait above, blob-data-plane RBAC can take
+      # longer than 3 min to land on a brand-new account, and transient 403s
+      # clear on their own. Each attempt is a full apply, so a partial first
+      # attempt is just reconciled by the next.
+      - name: Terraform Apply (Main deployment)
         working-directory: ${{ env.TF_WORKING_DIR }}
         run: |
-          terraform apply -auto-approve -input=false -var-file="terraform.tfvars" \
-            -var="bootstrap_storage_public_network_access_enabled=true" \
-            -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'
+          for attempt in 1 2 3 4; do
+            if terraform apply -auto-approve -input=false -var-file="terraform.tfvars" \
+                 -var="bootstrap_storage_public_network_access_enabled=true" \
+                 -var='bootstrap_storage_allowed_ips=["${{ steps.runnerip.outputs.ip }}"]'; then
+              exit 0
+            fi
+            echo "::warning::main apply failed (attempt ${attempt}/4) - retrying in 60s (storage data-plane RBAC propagation)"
+            sleep 60
+          done
+          echo "::error::main apply still failing after 4 attempts"
+          exit 1
 
       - name: Terraform Apply (re-lock storage public endpoint)
         working-directory: ${{ env.TF_WORKING_DIR }}

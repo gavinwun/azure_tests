@@ -76,10 +76,16 @@ resource "azurerm_storage_blob" "bootstrap_script" {
   content_md5 = filemd5("${path.module}/scripts/bootstrap_agent.sh")
 
   # This is a data-plane write authenticated with the pipeline identity's
-  # AAD token (shared_access_key_enabled = false), so the role assignment
-  # granting it must exist first. Terraform sees no implicit link between
-  # them otherwise - nothing here references the assignment.
-  depends_on = [azurerm_role_assignment.pipeline_blob_contributor]
+  # AAD token (shared_access_key_enabled = false). The role assignment
+  # granting it must not only exist but have PROPAGATED to the storage
+  # data plane - a fresh assignment returns 403 "not authorized ... using
+  # this permission" for the first few minutes. time_sleep.blob_rbac_lag
+  # holds the apply until it's effective. Nothing here references the
+  # assignment directly, so the dependency is explicit.
+  depends_on = [
+    azurerm_role_assignment.pipeline_blob_contributor,
+    time_sleep.blob_rbac_lag,
+  ]
 }
 
 resource "azurerm_role_assignment" "vmss_blob_reader" {
@@ -104,6 +110,23 @@ resource "azurerm_role_assignment" "pipeline_blob_contributor" {
   scope                = azurerm_storage_account.bootstrap[0].id
   role_definition_name = "Storage Blob Data Contributor"
   principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# Azure RBAC role assignments take a few minutes to become effective on
+# the storage data plane. Without this wait the very first apply (or a
+# from-scratch redeploy with a new random suffix) races the assignment
+# above and the bootstrap_agent.sh upload fails with a 403. Re-creates the
+# wait only when the assignment itself changes, so steady-state applies
+# don't pay the delay.
+resource "time_sleep" "blob_rbac_lag" {
+  count = var.compute_backend == "vmss" ? 1 : 0
+
+  depends_on      = [azurerm_role_assignment.pipeline_blob_contributor]
+  create_duration = "180s"
+
+  triggers = {
+    role_assignment_id = azurerm_role_assignment.pipeline_blob_contributor[0].id
+  }
 }
 
 #########################################
