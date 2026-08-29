@@ -30,9 +30,15 @@ locals {
   )
 
   # Linux perf counters AMA understands. Wildcards expand per-disk /
-  # per-interface at ingestion time.
+  # per-interface / per-core at ingestion time.
+  #
+  # Processor MUST use (*) not (_Total): the "_Total" instance only
+  # exists on Windows. With (_Total) the Linux agent silently collects
+  # nothing for CPU (Memory still works - it has no instance qualifier).
+  # (*) emits one row per core; averaging CounterValue across cores gives
+  # overall CPU %, which is what the workbook queries do.
   vmss_perf_counters = [
-    "\\Processor(_Total)\\% Processor Time",
+    "\\Processor(*)\\% Processor Time",
     "\\Memory\\Available MBytes",
     "\\Memory\\% Used Memory",
     "\\Logical Disk(*)\\% Used Space",
