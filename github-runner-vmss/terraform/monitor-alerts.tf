@@ -62,6 +62,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "low_disk" {
       Perf
       | where ObjectName == "Logical Disk" and CounterName == "% Used Space"
       | where Computer startswith "${local.vmss_computer_name_prefix}"
+      | where InstanceName !startswith "/snap" and InstanceName !in ("_Total", "/boot/efi")
       | summarize AggregatedValue = max(CounterValue) by Computer, bin(TimeGenerated, 5m)
     QUERY
 

@@ -130,7 +130,7 @@
       "name": "ov-kpi",
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let prefix = '${computer_prefix}';\nlet online = toscalar(Heartbeat | where Computer startswith prefix | summarize dcountif(Computer, TimeGenerated > ago(10m)));\nlet total = toscalar(Heartbeat | where Computer startswith prefix | summarize dcount(Computer));\nlet bootFail = toscalar(Syslog | where TimeGenerated > ago(24h) | where Facility == 'local0' | where SyslogMessage has_cs 'ERROR' or SyslogMessage has_cs 'FATAL' or SyslogMessage has 'still failing after' | summarize dcount(Computer));\nlet diskHot = toscalar(Perf | where Computer startswith prefix | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | summarize arg_max(TimeGenerated, CounterValue) by Computer, InstanceName | summarize countif(CounterValue >= toreal('{DiskWarn}')));\nlet sysErr = toscalar(Syslog | where TimeGenerated > ago(24h) | where Computer startswith prefix | where SeverityLevel in ('err','error','crit','alert','emerg') | count);\nunion\n(print Metric = 'Runners online', Value = strcat(tostring(online), ' / ', tostring(total)), o = 1),\n(print Metric = 'Bootstrap failures (24h)', Value = tostring(bootFail), o = 2),\n(print Metric = 'Disk mounts at/over warn', Value = tostring(diskHot), o = 3),\n(print Metric = 'OS errors (24h)', Value = tostring(sysErr), o = 4)\n| sort by o asc | project Metric, Value",
+        "query": "let prefix = '${computer_prefix}';\nlet online = toscalar(Heartbeat | where Computer startswith prefix | summarize dcountif(Computer, TimeGenerated > ago(10m)));\nlet total = toscalar(Heartbeat | where Computer startswith prefix | summarize dcount(Computer));\nlet bootFail = toscalar(Syslog | where TimeGenerated > ago(24h) | where Facility == 'local0' | where SyslogMessage has_cs 'ERROR' or SyslogMessage has_cs 'FATAL' or SyslogMessage has 'still failing after' | summarize dcount(Computer));\nlet diskHot = toscalar(Perf | where Computer startswith prefix | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | where InstanceName !startswith '/snap' and InstanceName !in ('_Total', '/boot/efi') | summarize arg_max(TimeGenerated, CounterValue) by Computer, InstanceName | summarize countif(CounterValue >= toreal('{DiskWarn}')));\nlet sysErr = toscalar(Syslog | where TimeGenerated > ago(24h) | where Computer startswith prefix | where SeverityLevel in ('err','error','crit','alert','emerg') | count);\nunion\n(print Metric = 'Runners online', Value = strcat(tostring(online), ' / ', tostring(total)), o = 1),\n(print Metric = 'Bootstrap failures (24h)', Value = tostring(bootFail), o = 2),\n(print Metric = 'Disk mounts at/over warn', Value = tostring(diskHot), o = 3),\n(print Metric = 'OS errors (24h)', Value = tostring(sysErr), o = 4)\n| sort by o asc | project Metric, Value",
         "size": 3,
         "timeContext": { "durationMs": 86400000 },
         "queryType": 0,
@@ -166,7 +166,7 @@
       "name": "ov-grid",
       "content": {
         "version": "KqlItem/1.0",
-        "query": "let prefix = '${computer_prefix}';\nlet hb = Heartbeat | where Computer startswith prefix | summarize LastHeartbeat = max(TimeGenerated) by Computer;\nlet perf = Perf | where Computer startswith prefix | where TimeGenerated > ago(15m)\n  | summarize CPU_pct = round(avgif(CounterValue, ObjectName == 'Processor' and CounterName == '% Processor Time'), 1),\n              Mem_used_pct = round(avgif(CounterValue, ObjectName == 'Memory' and CounterName == '% Used Memory'), 1),\n              Disk_used_pct = round(maxif(CounterValue, ObjectName == 'Logical Disk' and CounterName == '% Used Space'), 1)\n    by Computer;\nhb | join kind=leftouter perf on Computer\n| extend Status = iff(LastHeartbeat > ago(10m), 'Online', 'Stale')\n| project Computer, Status, LastHeartbeat, CPU_pct, Mem_used_pct, Disk_used_pct\n| sort by Computer asc",
+        "query": "let prefix = '${computer_prefix}';\nlet hb = Heartbeat | where Computer startswith prefix | summarize LastHeartbeat = max(TimeGenerated) by Computer;\nlet perf = Perf | where Computer startswith prefix | where TimeGenerated > ago(15m)\n  | summarize CPU_pct = round(avgif(CounterValue, ObjectName == 'Processor' and CounterName == '% Processor Time'), 1),\n              Mem_used_pct = round(avgif(CounterValue, ObjectName == 'Memory' and CounterName == '% Used Memory'), 1),\n              Disk_used_pct = round(maxif(CounterValue, ObjectName == 'Logical Disk' and CounterName == '% Used Space' and InstanceName !startswith '/snap' and InstanceName !in ('_Total', '/boot/efi')), 1)\n    by Computer;\nhb | join kind=leftouter perf on Computer\n| extend Status = iff(LastHeartbeat > ago(10m), 'Online', 'Stale')\n| project Computer, Status, LastHeartbeat, CPU_pct, Mem_used_pct, Disk_used_pct\n| sort by Computer asc",
         "size": 0,
         "title": "Runners - current state (last 15 min)",
         "timeContext": { "durationMs": 86400000 },
@@ -246,7 +246,7 @@
       "name": "cmp-disk",
       "content": {
         "version": "KqlItem/1.0",
-        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | summarize Used_pct = max(CounterValue) by bin(TimeGenerated, 15m), Mount = strcat(Computer, ' ', InstanceName) | render timechart",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | where InstanceName !startswith '/snap' and InstanceName !in ('_Total', '/boot/efi') | summarize Used_pct = max(CounterValue) by bin(TimeGenerated, 15m), Mount = strcat(Computer, ' ', InstanceName) | render timechart",
         "size": 0,
         "title": "Disk used %  - per mount",
         "timeContextFromParameter": "TimeRange",
@@ -262,7 +262,7 @@
       "name": "cmp-disklow",
       "content": {
         "version": "KqlItem/1.0",
-        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | summarize arg_max(TimeGenerated, CounterValue) by Computer, InstanceName | extend Used_pct = round(CounterValue, 1) | where Used_pct >= toreal('{DiskWarn}') | extend Severity = iff(Used_pct >= toreal('{DiskCrit}'), 'Critical', 'Warning') | project Computer, Mount = InstanceName, Used_pct, Severity, TimeGenerated | sort by Used_pct desc",
+        "query": "Perf | where Computer startswith '${computer_prefix}' | where ObjectName == 'Logical Disk' and CounterName == '% Used Space' | where InstanceName !startswith '/snap' and InstanceName !in ('_Total', '/boot/efi') | summarize arg_max(TimeGenerated, CounterValue) by Computer, InstanceName | extend Used_pct = round(CounterValue, 1) | where Used_pct >= toreal('{DiskWarn}') | extend Severity = iff(Used_pct >= toreal('{DiskCrit}'), 'Critical', 'Warning') | project Computer, Mount = InstanceName, Used_pct, Severity, TimeGenerated | sort by Used_pct desc",
         "size": 0,
         "title": "Low disk space - mounts at or over the warn threshold",
         "timeContext": { "durationMs": 86400000 },
