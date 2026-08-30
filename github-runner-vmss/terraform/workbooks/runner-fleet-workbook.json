@@ -593,7 +593,7 @@
     {
       "type": 1,
       "name": "fn-text",
-      "content": { "json": "## Queue-metric function\nOnly populated when the optional Function App is deployed (`enable_queue_metric_function = true`). It publishes the `${custom_metric_name}` autoscale metric from a GitHub `workflow_job` webhook plus a 3-minute timer, and runs an hourly cleanup of orphaned runner registrations. Data comes from its workspace-based Application Insights (`App*` tables)." },
+      "content": { "json": "## Queue-metric function\nOnly populated when the optional Function App is deployed (`enable_queue_metric_function = true`). It publishes the `${custom_metric_name}` autoscale metric from a GitHub `workflow_job` webhook plus a 3-minute timer, and runs an hourly cleanup of orphaned runner registrations. Data comes from its workspace-based Application Insights (`App*` tables).\n\n> The exceptions grid filters out `node exited with code 143` / `ThrowIfExitError` / `request stream was aborted`. Those are the Functions host sending SIGTERM (143 = 128+15) to the Node worker when Flex Consumption recycles or scales an idle instance to zero between timer ticks - normal platform churn, not a code fault (a real crash is exit 1, an OOM is 137). Judge function health from **invocation success** above, not these." },
       "conditionalVisibilities": [ { "parameterName": "selectedTab", "comparison": "isEqualTo", "value": "function" } ]
     },
     {
@@ -617,9 +617,9 @@
       "name": "fn-exceptions",
       "content": {
         "version": "KqlItem/1.0",
-        "query": "AppExceptions | where AppRoleName startswith '${queue_fn_role_prefix}' | project TimeGenerated, ProblemId, OuterMessage, OperationName | sort by TimeGenerated desc | take 200",
+        "query": "AppExceptions | where AppRoleName startswith '${queue_fn_role_prefix}' | where ProblemId !has 'ThrowIfExitError' and OuterMessage !has 'node exited with code 143' and OuterMessage !has 'request stream was aborted' | project TimeGenerated, ProblemId, OuterMessage, OperationName | sort by TimeGenerated desc | take 200",
         "size": 0,
-        "title": "Function exceptions",
+        "title": "Function exceptions (host worker-recycle noise filtered out)",
         "timeContextFromParameter": "TimeRange",
         "timeContext": { "durationMs": 0 },
         "queryType": 0,

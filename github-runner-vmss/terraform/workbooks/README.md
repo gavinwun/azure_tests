@@ -43,6 +43,21 @@ parameters discover the fleet at open time via Azure Resource Graph on the
 | **Queue-metric function** | workspace-based App Insights (`AppRequests` / `AppExceptions` / `AppTraces`) | Invocation success vs failure, exceptions, metric-publish and cleanup traces. Empty unless `enable_queue_metric_function = true` |
 | **Alerts** | Azure Resource Graph (`alertsmanagementresources`) | Alerts fired against the fleet in the last 24 h, plus a **recommended alert-rule** table |
 
+## Filtered noise
+
+The **Queue-metric function → Function exceptions** grid deliberately drops rows
+where `ProblemId` has `ThrowIfExitError`, or `OuterMessage` has
+`node exited with code 143` or `request stream was aborted`.
+
+These are not application errors. On Flex Consumption the Functions host sends
+the Node language worker `SIGTERM` (exit `143` = `128 + 15`) every time the
+platform recycles or scales an idle instance to zero between the 3-minute timer
+ticks - many times an hour, by design. The gRPC `request stream was aborted`
+line is the same event seen from the host↔worker channel. A genuine code fault
+exits `1` (unhandled rejection) or `137` (`SIGKILL` / OOM), and would also show
+up as a failed invocation. Judge function health from the **invocation
+success/failure** chart, not from these lifecycle exceptions.
+
 ## Editing
 
 Edit the workbook in the portal, then **Advanced Editor → Template Type: Gallery
