@@ -1,5 +1,5 @@
 # Adapted from https://learn.microsoft.com/en-us/azure/devops/pipelines/agents/scale-set-agents?view=azure-devops
-# Converted: Windows Server 2022 / Azure DevOps agent -> Ubuntu 22.04 LTS / GitHub Actions self-hosted runner
+# Converted: Windows Server 2022 / Azure DevOps agent -> CIS Hardened Ubuntu 24.04 LTS / GitHub Actions self-hosted runner
 #
 # Everything in this file is gated by var.compute_backend == "vmss" via
 # `count`. Set compute_backend = "aci" in terraform.tfvars to deploy
@@ -182,6 +182,20 @@ resource "azurerm_private_endpoint" "bootstrap_blob" {
 # VM Scale Set (Linux)  #
 #########################
 
+# The CIS Hardened Ubuntu 24.04 image is a paid Marketplace offer; its
+# terms must be accepted once per subscription before the VMSS can
+# reference it. Managing the agreement here keeps a fresh subscription
+# self-contained. If the terms are already accepted (or you accept them
+# out-of-band with `az vm image terms accept`), an import or
+# `az vm image terms accept` keeps this a no-op.
+resource "azurerm_marketplace_agreement" "cis_ubuntu_2404" {
+  count = var.compute_backend == "vmss" ? 1 : 0
+
+  publisher = "center-for-internet-security-inc"
+  offer     = "cis-ubuntu"
+  plan      = "cis-ubuntulinux2404-l1-gen2"
+}
+
 # CHANGED: azurerm_windows_virtual_machine_scale_set -> azurerm_linux_virtual_machine_scale_set
 resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
   count = var.compute_backend == "vmss" ? 1 : 0
@@ -208,14 +222,28 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
   }
 
   # -----------------------------------------------------------------
-  # OS Image - Ubuntu 22.04 LTS (Gen2)
-  # Bump offer/sku to "ubuntu-24_04-lts" / "server" for 24.04 if preferred.
+  # OS Image - CIS Hardened Ubuntu 24.04 LTS, Level 1, Gen2.
+  # Published by the Center for Internet Security, pre-hardened to the
+  # CIS Ubuntu 24.04 Benchmark (Level 1) and patched monthly.
+  # URN: center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest
+  #
+  # This is a paid Azure Marketplace image, so it needs BOTH:
+  #   1. a matching `plan` block below, and
+  #   2. the marketplace terms accepted for the subscription
+  #      (azurerm_marketplace_agreement.cis_ubuntu_2404 below, or a
+  #      one-off `az vm image terms accept --urn <URN>`).
   # -----------------------------------------------------------------
   source_image_reference {
-    publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts-gen2"
+    publisher = "center-for-internet-security-inc"
+    offer     = "cis-ubuntu"
+    sku       = "cis-ubuntulinux2404-l1-gen2"
     version   = "latest"
+  }
+
+  plan {
+    name      = "cis-ubuntulinux2404-l1-gen2"
+    publisher = "center-for-internet-security-inc"
+    product   = "cis-ubuntu"
   }
 
   # -----------------------------------------------------------------
@@ -286,9 +314,11 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
 
   # Same RBAC-propagation reasoning as the private endpoint above - the
   # devopsagent subnet attach needs pipeline_network_hub_contributor to
-  # have actually taken effect first.
+  # have actually taken effect first. The marketplace agreement must also
+  # be in place before Azure will accept the CIS `plan` block.
   depends_on = [
-    azurerm_role_assignment.pipeline_network_hub_contributor
+    azurerm_role_assignment.pipeline_network_hub_contributor,
+    azurerm_marketplace_agreement.cis_ubuntu_2404
   ]
 }
 

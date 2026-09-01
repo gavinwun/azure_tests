@@ -82,6 +82,91 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 # ---------------------------------------------------------------------
+# CIS Hardened image compatibility
+#
+# The VM image is the CIS Hardened Ubuntu 24.04 LTS (Level 1) Marketplace
+# image - it boots with the CIS Benchmark already applied. A handful of
+# those controls, left as-is, break this first-boot provisioner or the
+# running runner. Each fix below is scoped as narrowly as possible, is
+# idempotent, and does NOT rewrite the CIS config on disk (so the host
+# stays compliant after reboot). Anything not listed here - AppArmor
+# enforce, auditd immutable rules, PAM/faillock, SSH hardening, disabled
+# filesystem/USB kernel modules, login banners - does not touch what
+# this script or the runner does, so it's deliberately left alone.
+# ---------------------------------------------------------------------
+
+# (a) umask. CIS sets a restrictive default umask (027/077). This script
+#     is explicit with chown/chmod on the files that matter, but pin a
+#     sane umask for the provisioning run so nothing created here lands
+#     unreadable to the actions-runner service account. The system-wide
+#     default the image ships is left untouched.
+umask 022
+
+# (b) exec-able temp dir. CIS mounts /tmp and /var/tmp noexec. Point
+#     TMPDIR at a dir on the (exec) root filesystem for the bootstrap
+#     run so any installer that execs a helper out of $TMPDIR (dotnet
+#     first-run, some apt maintainer scripts, ./bin/installdependencies.sh)
+#     works, without remounting /tmp and undoing the control host-wide.
+export TMPDIR=/var/lib/ghrunner/tmp
+mkdir -p "${TMPDIR}"
+chmod 1777 "${TMPDIR}"
+
+# (c) host firewall egress. If the image ships a default-deny *outbound*
+#     host firewall, this instance cannot reach Azure IMDS
+#     (169.254.169.254 - managed-identity tokens in mint-gh-token.sh and
+#     scheduled-events in terminate-watcher.sh), the WireServer
+#     (168.63.129.16 - platform DNS / the CustomScript extension itself),
+#     the Key Vault and bootstrap-storage private endpoints inside the
+#     VNet, GitHub, or the apt mirrors - and the script dies at the first
+#     curl. Inbound stays denied (a persistent runner never listens); we
+#     only widen egress, and only if such a firewall is actually active.
+_allow_egress_ufw() {
+  ufw status 2>/dev/null | grep -q "Status: active" || return 1
+  echo "CIS-compat: ufw is active - allowing required outbound"
+  ufw allow out to 169.254.169.254 comment 'Azure IMDS' || true
+  ufw allow out to 168.63.129.16 comment 'Azure WireServer/DNS' || true
+  ufw allow out 53 comment 'DNS' || true
+  ufw allow out 80/tcp comment 'apt / HTTP redirects' || true
+  ufw allow out 443/tcp comment 'GitHub, Azure, package repos' || true
+  ufw allow out 123/udp comment 'NTP (JWT/AAD clock skew)' || true
+  # The subnet CIDR straight from IMDS - covers the Key Vault and
+  # bootstrap-storage private endpoints and anything else in the VNet.
+  local a p
+  a=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/address?api-version=2021-02-01&format=text" 2>/dev/null || true)
+  p=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/prefix?api-version=2021-02-01&format=text" 2>/dev/null || true)
+  [ -n "${a}" ] && [ -n "${p}" ] && ufw allow out to "${a}/${p}" comment 'in-VNet (private endpoints)' || true
+  return 0
+}
+
+_allow_egress_nft() {
+  systemctl is-active --quiet nftables 2>/dev/null || return 1
+  local out
+  out=$(nft list chain inet filter output 2>/dev/null) || return 1
+  # Re-run guard: if our link-local accept is already there, do nothing.
+  printf '%s' "${out}" | grep -q '169.254.169.254' && return 0
+  echo "CIS-compat: nftables output filtering is active - inserting allow rules"
+  nft insert rule inet filter output ip daddr 168.63.129.16 accept || true
+  nft insert rule inet filter output ip daddr 169.254.169.254 accept || true
+  nft insert rule inet filter output ct state established,related accept || true
+  return 0
+}
+
+if command -v ufw >/dev/null 2>&1 && _allow_egress_ufw; then
+  :
+elif command -v nft >/dev/null 2>&1 && _allow_egress_nft; then
+  :
+else
+  echo "CIS-compat: no default-deny host firewall detected (or it permits egress) - nothing to open"
+fi
+
+# (d) IP forwarding for docker-in-docker workflows. CIS sets
+#     net.ipv4.ip_forward=0 in /etc/sysctl.d. dockerd flips the runtime
+#     value back on when it starts; set it now (runtime only - the CIS
+#     sysctl file is not edited, so a reboot without docker reverts it)
+#     so container networking is up as soon as docker.io installs below.
+sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------
 # apt hardening
 #
 # On a fresh VMSS instance, cloud-init and the apt-daily / unattended-

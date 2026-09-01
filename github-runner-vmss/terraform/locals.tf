@@ -58,6 +58,28 @@ locals {
       exit 0
     fi
 
+    # CIS Hardened image (Ubuntu 24.04 L1): if the image boots with a
+    # default-deny *outbound* host firewall, open just enough to reach
+    # Azure IMDS and the in-VNet storage private endpoint so this
+    # download can run. bootstrap_agent.sh re-asserts the full egress
+    # allow-list (GitHub, apt mirrors, NTP, ...) once it's fetched.
+    # Inbound stays denied - a persistent runner never listens.
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+      echo "CIS-compat (preamble): ufw active - opening IMDS + in-VNet egress"
+      ufw allow out to 169.254.169.254 >/dev/null 2>&1 || true
+      ufw allow out to 168.63.129.16 >/dev/null 2>&1 || true
+      ufw allow out 53 >/dev/null 2>&1 || true
+      ufw allow out 443/tcp >/dev/null 2>&1 || true
+      SUBNET_ADDR=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/address?api-version=2021-02-01&format=text" 2>/dev/null || true)
+      SUBNET_PREFIX=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/prefix?api-version=2021-02-01&format=text" 2>/dev/null || true)
+      [ -n "$${SUBNET_ADDR}" ] && [ -n "$${SUBNET_PREFIX}" ] && ufw allow out to "$${SUBNET_ADDR}/$${SUBNET_PREFIX}" >/dev/null 2>&1 || true
+    elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null && nft list chain inet filter output >/dev/null 2>&1; then
+      echo "CIS-compat (preamble): nftables output filter active - inserting IMDS allow"
+      nft insert rule inet filter output ip daddr 168.63.129.16 accept >/dev/null 2>&1 || true
+      nft insert rule inet filter output ip daddr 169.254.169.254 accept >/dev/null 2>&1 || true
+      nft insert rule inet filter output ct state established,related accept >/dev/null 2>&1 || true
+    fi
+
     SCRIPT_URL="${local.bootstrap_agent_url}"
     TOKEN_URI="http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F"
 
