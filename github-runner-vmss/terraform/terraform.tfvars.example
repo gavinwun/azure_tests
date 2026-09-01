@@ -40,6 +40,15 @@ github_repo         = ""   # "owner/repo", required when github_runner_scope = "
 # procedure before changing this on a live deployment.
 compute_backend = "vmss"
 
+# The vmss backend runs on the CIS Hardened Ubuntu 24.04 Marketplace
+# image. true (default): Terraform accepts its Marketplace terms and
+# manages the subscription-scoped Microsoft.MarketplaceOrdering RBAC the
+# deploy identity needs (marketplace-rbac.tf) - requires a one-time
+# subscription Owner / User Access Administrator grant on that identity
+# (README step 7.3). false: you accepted the terms out-of-band with
+# `az vm image terms accept` and Terraform stays out of subscription scope.
+# manage_marketplace_agreement = true
+
 # Azure Monitor Agent on the VMSS instances (vmss backend only). On by
 # default; it ships syslog + bootstrap output + perf counters to Log
 # Analytics. Leave log_analytics_workspace_id empty to have Terraform

@@ -687,6 +687,39 @@ workflow carrying that blast radius.
    `keyvault-rbac.tf` takes over managing this grant going forward, same
    as `network-rbac.tf` does for the hub network access above.
 
+   **Marketplace terms for the CIS image (subscription scope).** The
+   vmss backend runs on the CIS Hardened Ubuntu 24.04 Marketplace image,
+   a paid offer whose terms must be accepted once per subscription.
+   `marketplace-rbac.tf` does this in Terraform: a minimal custom role
+   (`Microsoft.MarketplaceOrdering/...` actions only) assigned to the
+   deploy identity at subscription scope, then
+   `azurerm_marketplace_agreement.cis_ubuntu_2404` accepts the terms.
+   Creating a **custom role definition and a subscription-scoped role
+   assignment** needs the deploy identity to hold `Owner` or
+   `User Access Administrator` at the subscription for the apply that
+   first creates them - otherwise apply fails with
+   `AuthorizationFailed ... Microsoft.MarketplaceOrdering/.../agreements/read`.
+   One-time grant (repeat only if the deploy identity is recreated):
+   ```bash
+   az role assignment create \
+     --assignee "$appId" \
+     --role "User Access Administrator" \
+     --scope "/subscriptions/$(az account show --query id -o tsv)"
+   ```
+   If you can't grant the pipeline identity subscription-scoped access,
+   set `manage_marketplace_agreement = false` in `terraform.tfvars` and
+   accept the terms out-of-band once instead - Terraform then touches
+   nothing at subscription scope:
+   ```bash
+   az vm image terms accept \
+     --urn center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest
+   ```
+   You can also tighten the one-time grant afterwards: once the custom
+   role exists, `User Access Administrator` can be swapped for
+   `Role Based Access Control Administrator` (which can manage the
+   assignment but not role definitions) if the role definition itself is
+   no longer expected to change.
+
    **Also double-check any resource names hardcoded in `data.tf`** (Key
    Vault name, VNet name, subnet names, DNS zone name) actually match what
    you created in step 0 and elsewhere - a name mismatch surfaces as
@@ -1219,12 +1252,16 @@ apply `main.tf` with `termination_notification` present. Worth knowing:
   Marketplace image (Level 1, Gen2) - URN
   `center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest`.
   It is a paid Marketplace offer, so the config carries a matching
-  `plan` block and an `azurerm_marketplace_agreement.cis_ubuntu_2404`
-  resource that accepts the terms for the subscription. If the identity
-  running `terraform apply` can't accept Marketplace terms, accept them
-  once out-of-band with
+  `plan` block, `azurerm_marketplace_agreement.cis_ubuntu_2404` to
+  accept the terms for the subscription, and `marketplace-rbac.tf` -
+  a minimal custom `Microsoft.MarketplaceOrdering` role assigned to the
+  deploy identity at subscription scope so it's allowed to. Creating
+  that role + assignment needs a one-time subscription-scoped `Owner` /
+  `User Access Administrator` grant on the deploy identity (see step 7.3
+  in the setup guide - "Marketplace terms for the CIS image"). If you
+  can't grant that, set `manage_marketplace_agreement = false` and run
   `az vm image terms accept --urn center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest`
-  and remove/import the agreement resource.
+  once instead - Terraform then touches nothing at subscription scope.
 - **CIS hardening vs. the bootstrap**: the image boots with the CIS
   Ubuntu 24.04 Benchmark (Level 1) already applied. `bootstrap_agent.sh`
   has a **"CIS Hardened image compatibility"** block near the top that

@@ -97,6 +97,37 @@ variable "bootstrap_storage_allowed_ips" {
   default     = []
 }
 
+#########################################################################
+# CIS image Marketplace terms
+#########################################################################
+# The vmss backend runs on the CIS Hardened Ubuntu 24.04 LTS Marketplace
+# image (main.tf source_image_reference / plan). It is a paid Marketplace
+# offer, so its terms must be accepted once per subscription before the
+# VMSS can reference it.
+
+variable "manage_marketplace_agreement" {
+  description = <<-EOT
+    When true (default), Terraform accepts the Azure Marketplace terms for
+    the CIS Hardened Ubuntu 24.04 image (azurerm_marketplace_agreement)
+    AND manages the subscription-scoped RBAC the deploy identity needs to
+    do so - a minimal custom role granting the Microsoft.MarketplaceOrdering
+    actions, assigned to that identity (see marketplace-rbac.tf).
+
+    Creating that role + assignment requires the deploy identity to hold
+    Owner or User Access Administrator at the SUBSCRIPTION for the apply
+    that first creates them (one-time bootstrap, same category as the
+    network-rbac.tf / keyvault-rbac.tf grants - see README step 7.3).
+
+    Set to false if the terms are already accepted for the subscription
+    (`az vm image terms accept --urn center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest`)
+    or another process owns them - then this module touches nothing at
+    subscription scope, and you are responsible for the terms being
+    accepted before the VMSS is created.
+  EOT
+  type        = bool
+  default     = true
+}
+
 variable "key_vault_name" {
   description = "Existing Key Vault holding the VMSS SSH public key secret and the github-app-token secret."
   type        = string

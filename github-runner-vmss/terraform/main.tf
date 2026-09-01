@@ -185,15 +185,21 @@ resource "azurerm_private_endpoint" "bootstrap_blob" {
 # The CIS Hardened Ubuntu 24.04 image is a paid Marketplace offer; its
 # terms must be accepted once per subscription before the VMSS can
 # reference it. Managing the agreement here keeps a fresh subscription
-# self-contained. If the terms are already accepted (or you accept them
-# out-of-band with `az vm image terms accept`), an import or
-# `az vm image terms accept` keeps this a no-op.
+# self-contained. The deploy identity's permission to do this comes from
+# marketplace-rbac.tf (a custom Microsoft.MarketplaceOrdering role);
+# time_sleep.marketplace_rbac_lag lets that grant replicate first.
+#
+# Set var.manage_marketplace_agreement = false to skip both this and the
+# subscription-scoped RBAC - e.g. when the terms are already accepted
+# (`az vm image terms accept --urn <URN>`) or another process owns them.
 resource "azurerm_marketplace_agreement" "cis_ubuntu_2404" {
-  count = var.compute_backend == "vmss" ? 1 : 0
+  count = var.compute_backend == "vmss" && var.manage_marketplace_agreement ? 1 : 0
 
   publisher = "center-for-internet-security-inc"
   offer     = "cis-ubuntu"
   plan      = "cis-ubuntulinux2404-l1-gen2"
+
+  depends_on = [time_sleep.marketplace_rbac_lag]
 }
 
 # CHANGED: azurerm_windows_virtual_machine_scale_set -> azurerm_linux_virtual_machine_scale_set
