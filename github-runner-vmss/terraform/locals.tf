@@ -20,6 +20,25 @@ locals {
   #   Syslog | where Facility == "local0"
   bootstrap_syslog_facility = "local0"
 
+  # Re-run detector for the CustomScript guard. Any edit to
+  # bootstrap_agent.sh OR any change to a cis_hardening_* input changes
+  # this string, so an instance that picks up the new VMSS model re-runs
+  # the WHOLE bootstrap instead of short-circuiting on its sentinel; an
+  # unchanged version still skips instantly. bootstrap_agent.sh's steps
+  # are all idempotent, so a re-run is safe.
+  #
+  # NOTE: upgrade_mode is "Manual" (main.tf), so LIVE instances only pick
+  # up a bumped version on reimage / rolling upgrade / `az vmss
+  # update-instances`. Newly scaled-out instances always get the latest.
+  bootstrap_version = substr(sha256(join("\n", [
+    filesha256("${path.module}/scripts/bootstrap_agent.sh"),
+    tostring(var.cis_hardening_enabled),
+    var.cis_hardening_level,
+    tostring(var.cis_hardening_manage_firewall),
+    var.cis_hardening_ref,
+    join(",", var.cis_hardening_skip_rules),
+  ])), 0, 16)
+
   # ---------------------------------------------------------------------
   # CustomScript preamble (vmss backend). Downloads bootstrap_agent.sh
   # from the private blob using the VM's managed identity, then runs it.
@@ -49,36 +68,31 @@ locals {
     exec > >(tee -a /var/log/bootstrap/bootstrap-download.log) 2>&1
     echo "=== CustomScript preamble $(date -u) ==="
 
-    # Run-once guard. CustomScript re-executes on every instance model
-    # update (VM resize, image bump, VMSS auto-repair). bootstrap_agent.sh
-    # writes this sentinel as its final step, so a failed first boot still
-    # retries; a completed one is skipped here before any download.
-    if [ -f /var/lib/ghrunner/.bootstrapped ]; then
-      echo "instance already bootstrapped - skipping"
+    # Re-run guard. CustomScript re-executes on every instance model
+    # update (VM resize, image bump, VMSS auto-repair, extension change).
+    # bootstrap_agent.sh writes the version it completed into this
+    # sentinel as its final step, so:
+    #   - a failed first boot still retries (no sentinel yet)
+    #   - an unchanged version is skipped here before any download
+    #   - a bumped version (script edit or cis_hardening_* change) falls
+    #     through and re-runs the whole thing (all steps are idempotent)
+    if [ -f /var/lib/ghrunner/.bootstrapped ] && \
+       [ "$(cat /var/lib/ghrunner/.bootstrapped 2>/dev/null)" = "${local.bootstrap_version}" ]; then
+      echo "instance already bootstrapped at version ${local.bootstrap_version} - skipping"
       exit 0
     fi
+    echo "bootstrapping to version ${local.bootstrap_version}"
 
-    # CIS Hardened image (Ubuntu 24.04 L1): if the image boots with a
-    # default-deny *outbound* host firewall, open just enough to reach
-    # Azure IMDS and the in-VNet storage private endpoint so this
-    # download can run. bootstrap_agent.sh re-asserts the full egress
-    # allow-list (GitHub, apt mirrors, NTP, ...) once it's fetched.
-    # Inbound stays denied - a persistent runner never listens.
-    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-      echo "CIS-compat (preamble): ufw active - opening IMDS + in-VNet egress"
-      ufw allow out to 169.254.169.254 >/dev/null 2>&1 || true
-      ufw allow out to 168.63.129.16 >/dev/null 2>&1 || true
-      ufw allow out 53 >/dev/null 2>&1 || true
-      ufw allow out 443/tcp >/dev/null 2>&1 || true
-      SUBNET_ADDR=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/address?api-version=2021-02-01&format=text" 2>/dev/null || true)
-      SUBNET_PREFIX=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/prefix?api-version=2021-02-01&format=text" 2>/dev/null || true)
-      [ -n "$${SUBNET_ADDR}" ] && [ -n "$${SUBNET_PREFIX}" ] && ufw allow out to "$${SUBNET_ADDR}/$${SUBNET_PREFIX}" >/dev/null 2>&1 || true
-    elif command -v nft >/dev/null 2>&1 && systemctl is-active --quiet nftables 2>/dev/null && nft list chain inet filter output >/dev/null 2>&1; then
-      echo "CIS-compat (preamble): nftables output filter active - inserting IMDS allow"
-      nft insert rule inet filter output ip daddr 168.63.129.16 accept >/dev/null 2>&1 || true
-      nft insert rule inet filter output ip daddr 169.254.169.254 accept >/dev/null 2>&1 || true
-      nft insert rule inet filter output ct state established,related accept >/dev/null 2>&1 || true
-    fi
+    # CIS Benchmark hardening knobs, passed through to bootstrap_agent.sh
+    # (harden_cis()). The script is a static blob - it can't see Terraform
+    # vars - so the preamble, which IS rendered by Terraform, exports them
+    # and the child process inherits them. Defaults live in the script.
+    export BOOTSTRAP_VERSION="${local.bootstrap_version}"
+    export CIS_HARDENING_ENABLED="${var.cis_hardening_enabled}"
+    export CIS_HARDENING_LEVEL="${var.cis_hardening_level}"
+    export CIS_HARDENING_MANAGE_FIREWALL="${var.cis_hardening_manage_firewall}"
+    export CIS_HARDENING_REF="${var.cis_hardening_ref}"
+    export CIS_HARDENING_SKIP_RULES="${join(" ", var.cis_hardening_skip_rules)}"
 
     SCRIPT_URL="${local.bootstrap_agent_url}"
     TOKEN_URI="http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F"

@@ -3,7 +3,7 @@
 Two interchangeable compute backends, switched with one Terraform
 variable (`compute_backend = "vmss"` or `"aci"`):
 
-- **vmss** (default) - CIS Hardened Ubuntu 24.04 VMSS instances that boot, install tooling
+- **vmss** (default) - Ubuntu 24.04 VMSS instances (CIS-hardened at first boot, see `cis_hardening_enabled`) that boot, install tooling
   via a bootstrap script, register as persistent runners (one runner per
   instance, job after job), and are scaled by a queue-depth-driven Azure
   Monitor autoscale rule; `terminate-watcher.sh` deregisters a runner
@@ -687,39 +687,6 @@ workflow carrying that blast radius.
    `keyvault-rbac.tf` takes over managing this grant going forward, same
    as `network-rbac.tf` does for the hub network access above.
 
-   **Marketplace terms for the CIS image (subscription scope).** The
-   vmss backend runs on the CIS Hardened Ubuntu 24.04 Marketplace image,
-   a paid offer whose terms must be accepted once per subscription.
-   `marketplace-rbac.tf` does this in Terraform: a minimal custom role
-   (`Microsoft.MarketplaceOrdering/...` actions only) assigned to the
-   deploy identity at subscription scope, then
-   `azurerm_marketplace_agreement.cis_ubuntu_2404` accepts the terms.
-   Creating a **custom role definition and a subscription-scoped role
-   assignment** needs the deploy identity to hold `Owner` or
-   `User Access Administrator` at the subscription for the apply that
-   first creates them - otherwise apply fails with
-   `AuthorizationFailed ... Microsoft.MarketplaceOrdering/.../agreements/read`.
-   One-time grant (repeat only if the deploy identity is recreated):
-   ```bash
-   az role assignment create \
-     --assignee "$appId" \
-     --role "User Access Administrator" \
-     --scope "/subscriptions/$(az account show --query id -o tsv)"
-   ```
-   If you can't grant the pipeline identity subscription-scoped access,
-   set `manage_marketplace_agreement = false` in `terraform.tfvars` and
-   accept the terms out-of-band once instead - Terraform then touches
-   nothing at subscription scope:
-   ```bash
-   az vm image terms accept \
-     --urn center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest
-   ```
-   You can also tighten the one-time grant afterwards: once the custom
-   role exists, `User Access Administrator` can be swapped for
-   `Role Based Access Control Administrator` (which can manage the
-   assignment but not role definitions) if the role definition itself is
-   no longer expected to change.
-
    **Also double-check any resource names hardcoded in `data.tf`** (Key
    Vault name, VNet name, subnet names, DNS zone name) actually match what
    you created in step 0 and elsewhere - a name mismatch surfaces as
@@ -1248,48 +1215,62 @@ apply `main.tf` with `termination_notification` present. Worth knowing:
   after rotating.
 - **Bump `RUNNER_VERSION`** in `bootstrap_agent.sh` deliberately when
   GitHub ships new runner releases - it's pinned on purpose.
-- **VM image**: `main.tf` uses the **CIS Hardened Ubuntu 24.04 LTS**
-  Marketplace image (Level 1, Gen2) - URN
-  `center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest`.
-  It is a paid Marketplace offer, so the config carries a matching
-  `plan` block, `azurerm_marketplace_agreement.cis_ubuntu_2404` to
-  accept the terms for the subscription, and `marketplace-rbac.tf` -
-  a minimal custom `Microsoft.MarketplaceOrdering` role assigned to the
-  deploy identity at subscription scope so it's allowed to. Creating
-  that role + assignment needs a one-time subscription-scoped `Owner` /
-  `User Access Administrator` grant on the deploy identity (see step 7.3
-  in the setup guide - "Marketplace terms for the CIS image"). If you
-  can't grant that, set `manage_marketplace_agreement = false` and run
-  `az vm image terms accept --urn center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest`
-  once instead - Terraform then touches nothing at subscription scope.
-- **CIS hardening vs. the bootstrap**: the image boots with the CIS
-  Ubuntu 24.04 Benchmark (Level 1) already applied. `bootstrap_agent.sh`
-  has a **"CIS Hardened image compatibility"** block near the top that
-  neutralises the controls which would otherwise break provisioning or
-  the running runner, each scoped narrowly and without rewriting the
-  on-disk CIS config (the host stays compliant after reboot):
-  - **umask** - pins `umask 022` for the provisioning run so runner
-    files aren't created unreadable to the `actions-runner` service
-    account; the system default is left as CIS set it.
-  - **`/tmp` `noexec`** - points `TMPDIR` at `/var/lib/ghrunner/tmp` on
-    the exec-able root fs for the run, instead of remounting `/tmp`.
-  - **host firewall egress** - if the image ships a default-deny
-    *outbound* `ufw`/`nftables` policy, the block opens only what the
-    runner needs outbound: Azure IMDS `169.254.169.254`, WireServer
-    `168.63.129.16`, DNS/NTP, `80`/`443`, and the instance's own subnet
-    CIDR (from IMDS) so the **Key Vault and bootstrap-storage private
-    endpoints and other in-VNet traffic** still work. Inbound stays
-    denied - a persistent runner never listens. If your image hardens
-    with a firewall other than ufw/nftables (e.g. raw `iptables`
-    persistence), add the equivalent egress rules there.
-  - **`net.ipv4.ip_forward`** - set back to `1` at runtime so
-    docker-in-docker workflows have container networking (dockerd would
-    do this anyway; the CIS sysctl file is untouched).
-
-  Controls left alone because they don't affect the runner: AppArmor
-  enforce, `auditd` immutable rules, PAM/faillock, SSH hardening,
-  disabled filesystem/USB kernel modules, login banners. This module
-  creates **no NSG**, so the host firewall above is the only new
-  egress control to worry about - your landing-zone subnet/NSG rules
-  are unchanged. Re-check this block when bumping to a new CIS image
-  version or profile (L2/STIG are stricter, especially on egress).
+- **VM image**: `main.tf` uses the **stock Canonical Ubuntu 24.04 LTS**
+  Gen2 image (`Canonical` / `ubuntu-24_04-lts` / `server` / `latest`) -
+  free, no Marketplace `plan` / purchase. The paid "CIS Hardened Images"
+  Marketplace offer needs a supported payment instrument on the
+  subscription, which free/sponsored subscriptions don't have
+  (`ResourcePurchaseValidationFailed ... the 'unknown' payment
+  instrument(s) is not supported`), so it isn't used.
+- **CIS hardening at first boot**: when `cis_hardening_enabled = true`
+  (the default), `bootstrap_agent.sh`'s `harden_cis()` applies the CIS
+  Ubuntu 24.04 Benchmark **after** the runner and terminate-watcher are
+  up, using the MIT-licensed
+  [`ansible-lockdown/UBUNTU24-CIS`](https://github.com/ansible-lockdown/UBUNTU24-CIS)
+  role pinned to `var.cis_hardening_ref`. No Marketplace purchase, no
+  Ubuntu Pro token. Adds ~1-3 min to first boot.
+  - **Best-effort**: the runner is already registered before hardening
+    runs, so a hardening failure logs a `WARN` (visible in Log
+    Analytics) but does not fail the bootstrap. A clean run drops
+    `/var/lib/ghrunner/.hardened` (with the version + `ref` it applied).
+  - **Runner-safe overrides** baked into `harden_cis()` (generated
+    `/etc/ghrunner/cis-overrides.yml`): `skip_reboot`, AIDE off (its db
+    init blocks boot for minutes), `auditd` disk-full/space actions set
+    to `syslog`/`rotate` so a full log dir never halts a long-lived
+    runner, `/tmp` + `/var/tmp` + `/dev/shm` kept exec-able (Actions
+    steps run helpers from temp dirs), `ubtu24cis_disruption_high:
+    false`, unattended boot (no GRUB password prompt). Post-run fixups
+    remount temp dirs exec, restore `net.ipv4.ip_forward=1` for
+    docker, and restart the runner + watcher.
+  - **Host firewall**: off by default (`cis_hardening_manage_firewall =
+    false`) - section 4 of the benchmark is skipped
+    (`ubtu24cis_firewall_package: none`) and the Azure NSG/subnet stays
+    the only network control. Set it `true` to have CIS configure `ufw`;
+    `harden_cis()` then sets `ubtu24cis_ufw_allow_out_ports: all` and
+    re-adds explicit egress allows for Azure IMDS `169.254.169.254`,
+    WireServer `168.63.129.16`, and the instance's own subnet CIDR (from
+    IMDS) so the Key Vault / bootstrap-storage private endpoints and
+    other in-VNet traffic keep working. Inbound stays default-deny.
+  - **Tuning** (`terraform.tfvars`): `cis_hardening_level`
+    (`"level1"`/`"level2"`), `cis_hardening_ref` (pinned tag - bump
+    deliberately after reading the changelog), `cis_hardening_skip_rules`
+    (extra `ubtu24cis_rule_*` vars to force off). This module creates
+    **no NSG**; your landing-zone subnet/NSG rules are unchanged.
+- **Re-running the bootstrap** (incl. re-applying hardening): the
+  CustomScript guard is version-aware. `local.bootstrap_version`
+  (`locals.tf`) is a hash of `bootstrap_agent.sh` **plus** every
+  `cis_hardening_*` input; each instance records the version it last
+  completed in `/var/lib/ghrunner/.bootstrapped`.
+  - Edit the script, or change any `cis_hardening_*` var, then
+    `terraform apply` - the new version lands in the VMSS model.
+  - `upgrade_mode` is **Manual**, so push it to live instances with
+    `az vmss update-instances --resource-group <rg> --name <vmss> --instance-ids '*'`
+    (or reimage / a rolling upgrade). Newly scaled-out instances pick it
+    up automatically.
+  - On next run each instance sees `sentinel != version` and re-runs the
+    whole script; every step is idempotent (`--replace` registration,
+    guarded creates, `svc.sh`, ansible). An unchanged version is a fast
+    no-op.
+  - Force a one-off re-run on a single box: `sudo rm
+    /var/lib/ghrunner/.bootstrapped /var/lib/ghrunner/.hardened` then
+    reimage it or `az vmss update-instances` that instance id.

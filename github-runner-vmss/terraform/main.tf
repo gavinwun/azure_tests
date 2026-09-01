@@ -182,26 +182,6 @@ resource "azurerm_private_endpoint" "bootstrap_blob" {
 # VM Scale Set (Linux)  #
 #########################
 
-# The CIS Hardened Ubuntu 24.04 image is a paid Marketplace offer; its
-# terms must be accepted once per subscription before the VMSS can
-# reference it. Managing the agreement here keeps a fresh subscription
-# self-contained. The deploy identity's permission to do this comes from
-# marketplace-rbac.tf (a custom Microsoft.MarketplaceOrdering role);
-# time_sleep.marketplace_rbac_lag lets that grant replicate first.
-#
-# Set var.manage_marketplace_agreement = false to skip both this and the
-# subscription-scoped RBAC - e.g. when the terms are already accepted
-# (`az vm image terms accept --urn <URN>`) or another process owns them.
-resource "azurerm_marketplace_agreement" "cis_ubuntu_2404" {
-  count = var.compute_backend == "vmss" && var.manage_marketplace_agreement ? 1 : 0
-
-  publisher = "center-for-internet-security-inc"
-  offer     = "cis-ubuntu"
-  plan      = "cis-ubuntulinux2404-l1-gen2"
-
-  depends_on = [time_sleep.marketplace_rbac_lag]
-}
-
 # CHANGED: azurerm_windows_virtual_machine_scale_set -> azurerm_linux_virtual_machine_scale_set
 resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
   count = var.compute_backend == "vmss" ? 1 : 0
@@ -228,28 +208,20 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
   }
 
   # -----------------------------------------------------------------
-  # OS Image - CIS Hardened Ubuntu 24.04 LTS, Level 1, Gen2.
-  # Published by the Center for Internet Security, pre-hardened to the
-  # CIS Ubuntu 24.04 Benchmark (Level 1) and patched monthly.
-  # URN: center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest
-  #
-  # This is a paid Azure Marketplace image, so it needs BOTH:
-  #   1. a matching `plan` block below, and
-  #   2. the marketplace terms accepted for the subscription
-  #      (azurerm_marketplace_agreement.cis_ubuntu_2404 below, or a
-  #      one-off `az vm image terms accept --urn <URN>`).
+  # OS Image - stock Canonical Ubuntu 24.04 LTS (Gen2), free (no
+  # Marketplace plan / purchase). CIS Benchmark hardening is applied at
+  # first boot by bootstrap_agent.sh instead, when var.cis_hardening_enabled
+  # is true (the default) - see that variable and locals.tf's preamble.
+  # The paid "CIS Hardened Images" Marketplace offer needs a supported
+  # payment instrument on the subscription, which a free/sponsored
+  # subscription doesn't have ("ResourcePurchaseValidationFailed ... the
+  # 'unknown' payment instrument(s) is not supported"), so it's not used.
   # -----------------------------------------------------------------
   source_image_reference {
-    publisher = "center-for-internet-security-inc"
-    offer     = "cis-ubuntu"
-    sku       = "cis-ubuntulinux2404-l1-gen2"
+    publisher = "Canonical"
+    offer     = "ubuntu-24_04-lts"
+    sku       = "server" # Gen2; "server-gen1" for Gen1
     version   = "latest"
-  }
-
-  plan {
-    name      = "cis-ubuntulinux2404-l1-gen2"
-    publisher = "center-for-internet-security-inc"
-    product   = "cis-ubuntu"
   }
 
   # -----------------------------------------------------------------
@@ -320,11 +292,9 @@ resource "azurerm_linux_virtual_machine_scale_set" "vmss" {
 
   # Same RBAC-propagation reasoning as the private endpoint above - the
   # devopsagent subnet attach needs pipeline_network_hub_contributor to
-  # have actually taken effect first. The marketplace agreement must also
-  # be in place before Azure will accept the CIS `plan` block.
+  # have actually taken effect first.
   depends_on = [
-    azurerm_role_assignment.pipeline_network_hub_contributor,
-    azurerm_marketplace_agreement.cis_ubuntu_2404
+    azurerm_role_assignment.pipeline_network_hub_contributor
   ]
 }
 

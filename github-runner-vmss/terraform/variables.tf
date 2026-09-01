@@ -98,34 +98,47 @@ variable "bootstrap_storage_allowed_ips" {
 }
 
 #########################################################################
-# CIS image Marketplace terms
+# CIS Benchmark hardening (applied at first boot, not a paid image)
 #########################################################################
-# The vmss backend runs on the CIS Hardened Ubuntu 24.04 LTS Marketplace
-# image (main.tf source_image_reference / plan). It is a paid Marketplace
-# offer, so its terms must be accepted once per subscription before the
-# VMSS can reference it.
+# The vmss backend runs on the stock Canonical Ubuntu 24.04 LTS image
+# (free). When cis_hardening_enabled is true, bootstrap_agent.sh applies
+# the CIS Ubuntu 24.04 Benchmark at first boot with the MIT-licensed
+# ansible-lockdown/UBUNTU24-CIS role (no Marketplace purchase, no Ubuntu
+# Pro token). See bootstrap_agent.sh's "CIS Benchmark hardening" section.
 
-variable "manage_marketplace_agreement" {
-  description = <<-EOT
-    When true (default), Terraform accepts the Azure Marketplace terms for
-    the CIS Hardened Ubuntu 24.04 image (azurerm_marketplace_agreement)
-    AND manages the subscription-scoped RBAC the deploy identity needs to
-    do so - a minimal custom role granting the Microsoft.MarketplaceOrdering
-    actions, assigned to that identity (see marketplace-rbac.tf).
-
-    Creating that role + assignment requires the deploy identity to hold
-    Owner or User Access Administrator at the SUBSCRIPTION for the apply
-    that first creates them (one-time bootstrap, same category as the
-    network-rbac.tf / keyvault-rbac.tf grants - see README step 7.3).
-
-    Set to false if the terms are already accepted for the subscription
-    (`az vm image terms accept --urn center-for-internet-security-inc:cis-ubuntu:cis-ubuntulinux2404-l1-gen2:latest`)
-    or another process owns them - then this module touches nothing at
-    subscription scope, and you are responsible for the terms being
-    accepted before the VMSS is created.
-  EOT
+variable "cis_hardening_enabled" {
+  description = "Apply the CIS Ubuntu 24.04 Benchmark at first boot via ansible-lockdown/UBUNTU24-CIS. Adds ~1-3 min to first boot. Set false for a plain runner (e.g. debugging, or when a separate config-management layer owns hardening)."
   type        = bool
   default     = true
+}
+
+variable "cis_hardening_level" {
+  description = "CIS profile to apply: \"level1\" (server) or \"level2\" (server). Level 2 is stricter and more likely to need extra rules skipped for CI workloads. Ignored when cis_hardening_enabled = false."
+  type        = string
+  default     = "level1"
+
+  validation {
+    condition     = contains(["level1", "level2"], var.cis_hardening_level)
+    error_message = "cis_hardening_level must be \"level1\" or \"level2\"."
+  }
+}
+
+variable "cis_hardening_manage_firewall" {
+  description = "Let the CIS role configure the host firewall (ufw). When true, bootstrap_agent.sh re-adds the egress rules the runner needs (Azure IMDS/WireServer, the instance's own subnet CIDR, DNS/NTP, 443) so it stays reachable. When false, the firewall CIS rules are skipped and the Azure NSG/subnet remains the only network control - safer for a CI runner, slightly less compliant."
+  type        = bool
+  default     = false
+}
+
+variable "cis_hardening_ref" {
+  description = "Git ref (tag) of ansible-lockdown/UBUNTU24-CIS to pin. Bump deliberately after reviewing the changelog - never floats on a branch."
+  type        = string
+  default     = "1.4.0"
+}
+
+variable "cis_hardening_skip_rules" {
+  description = "Extra ansible-lockdown rule variables to force off, e.g. [\"ubtu24cis_rule_1_1_2_1_2\"] to keep /tmp exec. Merged on top of the built-in runner-safe skip list in bootstrap_agent.sh."
+  type        = list(string)
+  default     = []
 }
 
 variable "key_vault_name" {

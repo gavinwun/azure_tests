@@ -40,14 +40,16 @@ github_repo         = ""   # "owner/repo", required when github_runner_scope = "
 # procedure before changing this on a live deployment.
 compute_backend = "vmss"
 
-# The vmss backend runs on the CIS Hardened Ubuntu 24.04 Marketplace
-# image. true (default): Terraform accepts its Marketplace terms and
-# manages the subscription-scoped Microsoft.MarketplaceOrdering RBAC the
-# deploy identity needs (marketplace-rbac.tf) - requires a one-time
-# subscription Owner / User Access Administrator grant on that identity
-# (README step 7.3). false: you accepted the terms out-of-band with
-# `az vm image terms accept` and Terraform stays out of subscription scope.
-# manage_marketplace_agreement = true
+# CIS hardening. The vmss backend runs stock (free) Canonical Ubuntu
+# 24.04 and, when cis_hardening_enabled = true (default), applies the CIS
+# Ubuntu 24.04 Benchmark at first boot via the MIT-licensed
+# ansible-lockdown/UBUNTU24-CIS role - no Marketplace purchase, no Ubuntu
+# Pro token. Adds ~1-3 min to first boot.
+# cis_hardening_enabled          = true
+# cis_hardening_level            = "level1"   # or "level2"
+# cis_hardening_manage_firewall  = false      # true = CIS configures ufw; bootstrap re-adds the runner's egress rules
+# cis_hardening_ref              = "1.6.0"    # pinned ansible-lockdown/UBUNTU24-CIS tag
+# cis_hardening_skip_rules       = []         # extra ubtu24cis_rule_* vars to force off
 
 # Azure Monitor Agent on the VMSS instances (vmss backend only). On by
 # default; it ships syslog + bootstrap output + perf counters to Log

@@ -1,11 +1,5 @@
 data "azurerm_client_config" "current" {}
 
-# Subscription is the scope Azure Marketplace agreements and the RBAC to
-# accept them live at (marketplace-rbac.tf). This is the ONLY place this
-# module reaches subscription scope, and it's only acted on when
-# var.manage_marketplace_agreement is true.
-data "azurerm_subscription" "current" {}
-
 data "azurerm_resource_group" "mgmt_devops" {
   name = var.resource_group_name
 }

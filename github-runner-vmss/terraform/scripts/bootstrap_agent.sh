@@ -20,23 +20,35 @@ exec > >(tee -a /var/log/bootstrap/bootstrap_agent_detail.log \
               >(logger -t ghrunner-bootstrap -p local0.info)) 2>&1
 
 # ---------------------------------------------------------------------
-# Run-once guard
+# Re-run guard
 #
 # The CustomScript extension (main.tf) re-executes its commandToExecute
-# on every instance model update - a VM resize, an OS image bump, VMSS
-# auto-repair. This script is a first-boot provisioner: it registers a
-# runner, useradds actions-runner, installs systemd units, and adds apt
-# repos. Re-running it on an already-configured instance can fail partway
-# and flip the whole extension to "provisioning failed".
+# on every instance model update - VM resize, OS image bump, VMSS
+# auto-repair, or an extension/settings change from `terraform apply`.
+# Every step in this script is idempotent (guarded creates, --replace
+# registration, `svc.sh` re-runnable, ansible), so a re-run is safe.
 #
-# The sentinel is written as the very last step below, so a first boot
-# that fails midway is still retried on the next extension run.
-# commandToExecute checks for the same file and skips the download too.
+# BOOTSTRAP_VERSION is exported by the CustomScript preamble - a hash of
+# this script's content PLUS the cis_hardening_* Terraform inputs
+# (locals.tf). The sentinel records the version this instance last
+# completed:
+#   - no sentinel            -> first boot (or a failed one) -> run
+#   - sentinel == version     -> nothing changed -> skip (fast no-op)
+#   - sentinel != version     -> script or CIS config bumped -> re-run
+#   - run by hand, no version -> honour a bare sentinel; `rm` it to force
+#
+# The sentinel is written as the very last step below, so a run that
+# fails midway is retried on the next extension execution.
 # ---------------------------------------------------------------------
 BOOTSTRAP_SENTINEL="/var/lib/ghrunner/.bootstrapped"
+BOOTSTRAP_VERSION="${BOOTSTRAP_VERSION:-}"
 if [[ -f "${BOOTSTRAP_SENTINEL}" ]]; then
-  echo "Bootstrap already completed ($(cat "${BOOTSTRAP_SENTINEL}" 2>/dev/null || echo 'date unknown')) - nothing to do."
-  exit 0
+  _done="$(cat "${BOOTSTRAP_SENTINEL}" 2>/dev/null || true)"
+  if [[ -z "${BOOTSTRAP_VERSION}" || "${_done}" == "${BOOTSTRAP_VERSION}" ]]; then
+    echo "Bootstrap already completed (${_done:-date unknown}) - nothing to do."
+    exit 0
+  fi
+  echo "Bootstrap sentinel is '${_done}', target version is '${BOOTSTRAP_VERSION}' - re-running."
 fi
 
 echo "Starting bootstrap at $(date -u)"
@@ -82,89 +94,22 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 
 # ---------------------------------------------------------------------
-# CIS Hardened image compatibility
+# Provisioning environment
 #
-# The VM image is the CIS Hardened Ubuntu 24.04 LTS (Level 1) Marketplace
-# image - it boots with the CIS Benchmark already applied. A handful of
-# those controls, left as-is, break this first-boot provisioner or the
-# running runner. Each fix below is scoped as narrowly as possible, is
-# idempotent, and does NOT rewrite the CIS config on disk (so the host
-# stays compliant after reboot). Anything not listed here - AppArmor
-# enforce, auditd immutable rules, PAM/faillock, SSH hardening, disabled
-# filesystem/USB kernel modules, login banners - does not touch what
-# this script or the runner does, so it's deliberately left alone.
+# The VM image is stock Canonical Ubuntu 24.04 LTS (free). CIS Benchmark
+# hardening, if enabled, is applied at the END of this script by
+# harden_cis() - see that function. These two lines just keep the
+# provisioning run itself predictable.
 # ---------------------------------------------------------------------
-
-# (a) umask. CIS sets a restrictive default umask (027/077). This script
-#     is explicit with chown/chmod on the files that matter, but pin a
-#     sane umask for the provisioning run so nothing created here lands
-#     unreadable to the actions-runner service account. The system-wide
-#     default the image ships is left untouched.
 umask 022
 
-# (b) exec-able temp dir. CIS mounts /tmp and /var/tmp noexec. Point
-#     TMPDIR at a dir on the (exec) root filesystem for the bootstrap
-#     run so any installer that execs a helper out of $TMPDIR (dotnet
-#     first-run, some apt maintainer scripts, ./bin/installdependencies.sh)
-#     works, without remounting /tmp and undoing the control host-wide.
+# Keep an exec-able TMPDIR on the root fs for the whole run. Harmless on
+# a stock image; matters once harden_cis() has (optionally) made /tmp
+# noexec on a re-run, and keeps installers that exec out of $TMPDIR
+# (dotnet first-run, ./bin/installdependencies.sh) working.
 export TMPDIR=/var/lib/ghrunner/tmp
 mkdir -p "${TMPDIR}"
 chmod 1777 "${TMPDIR}"
-
-# (c) host firewall egress. If the image ships a default-deny *outbound*
-#     host firewall, this instance cannot reach Azure IMDS
-#     (169.254.169.254 - managed-identity tokens in mint-gh-token.sh and
-#     scheduled-events in terminate-watcher.sh), the WireServer
-#     (168.63.129.16 - platform DNS / the CustomScript extension itself),
-#     the Key Vault and bootstrap-storage private endpoints inside the
-#     VNet, GitHub, or the apt mirrors - and the script dies at the first
-#     curl. Inbound stays denied (a persistent runner never listens); we
-#     only widen egress, and only if such a firewall is actually active.
-_allow_egress_ufw() {
-  ufw status 2>/dev/null | grep -q "Status: active" || return 1
-  echo "CIS-compat: ufw is active - allowing required outbound"
-  ufw allow out to 169.254.169.254 comment 'Azure IMDS' || true
-  ufw allow out to 168.63.129.16 comment 'Azure WireServer/DNS' || true
-  ufw allow out 53 comment 'DNS' || true
-  ufw allow out 80/tcp comment 'apt / HTTP redirects' || true
-  ufw allow out 443/tcp comment 'GitHub, Azure, package repos' || true
-  ufw allow out 123/udp comment 'NTP (JWT/AAD clock skew)' || true
-  # The subnet CIDR straight from IMDS - covers the Key Vault and
-  # bootstrap-storage private endpoints and anything else in the VNet.
-  local a p
-  a=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/address?api-version=2021-02-01&format=text" 2>/dev/null || true)
-  p=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/prefix?api-version=2021-02-01&format=text" 2>/dev/null || true)
-  [ -n "${a}" ] && [ -n "${p}" ] && ufw allow out to "${a}/${p}" comment 'in-VNet (private endpoints)' || true
-  return 0
-}
-
-_allow_egress_nft() {
-  systemctl is-active --quiet nftables 2>/dev/null || return 1
-  local out
-  out=$(nft list chain inet filter output 2>/dev/null) || return 1
-  # Re-run guard: if our link-local accept is already there, do nothing.
-  printf '%s' "${out}" | grep -q '169.254.169.254' && return 0
-  echo "CIS-compat: nftables output filtering is active - inserting allow rules"
-  nft insert rule inet filter output ip daddr 168.63.129.16 accept || true
-  nft insert rule inet filter output ip daddr 169.254.169.254 accept || true
-  nft insert rule inet filter output ct state established,related accept || true
-  return 0
-}
-
-if command -v ufw >/dev/null 2>&1 && _allow_egress_ufw; then
-  :
-elif command -v nft >/dev/null 2>&1 && _allow_egress_nft; then
-  :
-else
-  echo "CIS-compat: no default-deny host firewall detected (or it permits egress) - nothing to open"
-fi
-
-# (d) IP forwarding for docker-in-docker workflows. CIS sets
-#     net.ipv4.ip_forward=0 in /etc/sysctl.d. dockerd flips the runtime
-#     value back on when it starts; set it now (runtime only - the CIS
-#     sysctl file is not edited, so a reboot without docker reverts it)
-#     so container networking is up as soon as docker.io installs below.
-sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------
 # apt hardening
@@ -492,9 +437,174 @@ EOF
 systemctl daemon-reload
 systemctl enable --now terminate-watcher
 
-# Mark this instance done so the CustomScript extension doesn't re-run
-# bootstrap on the next model update (resize / image bump / auto-repair).
-mkdir -p "$(dirname "${BOOTSTRAP_SENTINEL}")"
-date -u +%FT%TZ > "${BOOTSTRAP_SENTINEL}"
+# ---------------------------------------------------------------------
+# 8. CIS Benchmark hardening (optional, best-effort)
+#
+# Stock Ubuntu 24.04 is not CIS-hardened. When CIS_HARDENING_ENABLED is
+# "true" (set from var.cis_hardening_enabled via the CustomScript
+# preamble), apply the CIS Ubuntu 24.04 Benchmark now - AFTER the runner
+# and terminate-watcher are up - with the MIT-licensed Ansible role
+# ansible-lockdown/UBUNTU24-CIS (https://github.com/ansible-lockdown/UBUNTU24-CIS),
+# pinned to a tag. No Marketplace purchase, no Ubuntu Pro token.
+#
+# It is BEST-EFFORT: the runner is already registered and working, so a
+# hardening failure logs loudly (visible in Log Analytics) but does not
+# fail the bootstrap. A clean run drops /var/lib/ghrunner/.hardened.
+#
+# The override file it generates trades a few strict-CIS ticks for
+# keeping a CI runner usable/available (auditd won't halt the box, /tmp
+# stays exec-able, AIDE's slow db-init is off, the host firewall is left
+# to the Azure NSG unless cis_hardening_manage_firewall = true). Tune via
+# the cis_hardening_* Terraform variables.
+# ---------------------------------------------------------------------
+harden_cis() {
+  local level="${CIS_HARDENING_LEVEL:-level1}"
+  local ref="${CIS_HARDENING_REF:-1.6.0}"
+  local manage_fw="${CIS_HARDENING_MANAGE_FIREWALL:-false}"
+  local repo_dir=/opt/ubuntu24-cis
+  local vars_file=/etc/ghrunner/cis-overrides.yml
+  local tags
 
-echo "Bootstrap complete at $(date -u). Runner ${INSTANCE_NAME} registered and running."
+  case "${level}" in
+    level1) tags="level1-server" ;;
+    level2) tags="level1-server,level2-server" ;;
+    *) echo "WARN: unknown CIS_HARDENING_LEVEL '${level}' - using level1"; level=level1; tags="level1-server" ;;
+  esac
+
+  echo "=== CIS hardening: ansible-lockdown/UBUNTU24-CIS @ ${ref} | tags=${tags} | manage_firewall=${manage_fw} ==="
+
+  apt_get install -y ansible git || return 1
+
+  # Pinned, shallow checkout of the role AT A TAG - never a branch.
+  if [[ -d "${repo_dir}/.git" ]]; then
+    git -C "${repo_dir}" fetch --depth 1 --tags origin "${ref}" 2>/dev/null || true
+    git -C "${repo_dir}" checkout -q "refs/tags/${ref}" 2>/dev/null \
+      || git -C "${repo_dir}" checkout -q "${ref}" || return 1
+  else
+    rm -rf "${repo_dir}"
+    git clone --depth 1 --branch "${ref}" \
+      https://github.com/ansible-lockdown/UBUNTU24-CIS.git "${repo_dir}" || return 1
+  fi
+
+  # The role needs community.general / community.crypto / ansible.posix.
+  # Ubuntu's `ansible` apt package bundles all three; only reach out to
+  # Ansible Galaxy if one is genuinely missing.
+  local c need_galaxy=0
+  for c in community.general community.crypto ansible.posix; do
+    ansible-galaxy collection list 2>/dev/null | grep -q "^${c} " || need_galaxy=1
+  done
+  if [[ "${need_galaxy}" -eq 1 ]]; then
+    echo "CIS hardening: fetching missing Ansible collections from Galaxy"
+    ansible-galaxy collection install community.general community.crypto ansible.posix \
+      || echo "WARN: ansible-galaxy install failed - continuing with the apt bundle"
+  fi
+
+  # ---- runner-safe overrides -----------------------------------------
+  mkdir -p /etc/ghrunner
+  {
+    echo "---"
+    echo "# Generated by bootstrap_agent.sh harden_cis() - do not edit by hand."
+    echo "skip_reboot: true"
+    echo "ubtu24cis_disruption_high: false"
+    echo "ubtu24cis_ask_passwd_to_boot: false"
+    echo "ubtu24cis_config_aide: false"
+    echo "ubtu24cis_level_1: true"
+    echo "ubtu24cis_level_2: $([[ "${level}" == "level2" ]] && echo true || echo false)"
+    # auditd must never halt/suspend a long-lived CI runner if its log dir fills.
+    echo "ubtu24cis_auditd_disk_full_action: syslog"
+    echo "ubtu24cis_auditd_disk_error_action: syslog"
+    echo "ubtu24cis_auditd_space_left_action: syslog"
+    echo "ubtu24cis_auditd_admin_space_left_action: syslog"
+    echo "ubtu24cis_auditd_max_log_file_action: rotate"
+    if [[ "${manage_fw}" == "true" ]]; then
+      echo "ubtu24cis_firewall_package: ufw"
+      # Runner needs arbitrary egress (IMDS, in-VNet private endpoints,
+      # GitHub, package mirrors); inbound is still default-deny.
+      echo "ubtu24cis_ufw_allow_out_ports: all"
+    else
+      echo "ubtu24cis_firewall_package: none"
+    fi
+    # Keep temp dirs exec-able - Actions steps and setup-* actions run
+    # helpers out of them. (x.x.x.4 == the 'noexec' sub-control.)
+    echo "ubtu24cis_rule_1_1_2_1_4: false   # /tmp noexec"
+    echo "ubtu24cis_rule_1_1_2_2_4: false   # /dev/shm noexec"
+    echo "ubtu24cis_rule_1_1_2_5_4: false   # /var/tmp noexec"
+  } > "${vars_file}"
+
+  # User-supplied extra opt-outs (space- or comma-separated var names).
+  local extra r
+  extra="${CIS_HARDENING_SKIP_RULES:-}"
+  for r in ${extra//,/ }; do
+    printf '%s: false\n' "${r}" >> "${vars_file}"
+  done
+
+  echo "--- ${vars_file} ---"; sed 's/^/  /' "${vars_file}"; echo "--------------------"
+
+  # ---- run it: this host only, local connection ---------------------
+  ANSIBLE_LOCALHOST_WARNING=False \
+  ANSIBLE_INVENTORY_UNPARSED_WARNING=False \
+  ANSIBLE_RETRY_FILES_ENABLED=False \
+  ansible-playbook "${repo_dir}/site.yml" \
+    --connection local \
+    --inventory 'localhost,' \
+    --limit localhost \
+    --tags "${tags}" \
+    --extra-vars "@${vars_file}" || return 1
+
+  # ---- post-hardening fixups: guarantee the runner keeps working ----
+  # regardless of exactly what the benchmark changed.
+  local m
+  for m in /tmp /var/tmp /dev/shm; do
+    if mount | grep -q " ${m} .*noexec"; then
+      mount -o remount,exec "${m}" 2>/dev/null || true
+    fi
+  done
+  [[ -f /etc/fstab ]] && sed -ri '/[[:space:]]\/(tmp|var\/tmp|dev\/shm)[[:space:]]/ s/\bnoexec\b/exec/g' /etc/fstab || true
+  if systemctl list-unit-files tmp.mount >/dev/null 2>&1; then
+    mkdir -p /etc/systemd/system/tmp.mount.d
+    printf '[Mount]\nOptions=mode=1777,strictatime,nosuid,nodev\n' \
+      > /etc/systemd/system/tmp.mount.d/10-runner-exec.conf
+    systemctl daemon-reload || true
+  fi
+
+  # docker networking: CIS sets net.ipv4.ip_forward=0; restore it and let
+  # dockerd rebuild its rules (no-op when docker isn't installed).
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+  if systemctl is-active --quiet docker; then systemctl restart docker || true; fi
+
+  # egress rules the runner + terminate-watcher depend on - only when we
+  # let CIS turn ufw on.
+  if [[ "${manage_fw}" == "true" ]] && command -v ufw >/dev/null 2>&1; then
+    ufw allow out to 169.254.169.254 comment 'Azure IMDS' || true
+    ufw allow out to 168.63.129.16 comment 'Azure WireServer/DNS' || true
+    local a p
+    a=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/address?api-version=2021-02-01&format=text" 2>/dev/null || true)
+    p=$(curl -s -H "Metadata:true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/subnet/0/prefix?api-version=2021-02-01&format=text" 2>/dev/null || true)
+    [ -n "${a}" ] && [ -n "${p}" ] && ufw allow out to "${a}/${p}" comment 'in-VNet (private endpoints)' || true
+    ufw reload || true
+  fi
+
+  # make sure the runner + watcher survived the PAM / limits / sysctl churn.
+  systemctl restart 'actions.runner.*' 2>/dev/null || { cd /opt/actions-runner && ./svc.sh start; } || true
+  systemctl restart terminate-watcher 2>/dev/null || true
+
+  mkdir -p /var/lib/ghrunner
+  printf '%s  version=%s  ref=%s\n' "$(date -u +%FT%TZ)" "${BOOTSTRAP_VERSION:-none}" "${ref}" \
+    > /var/lib/ghrunner/.hardened
+  echo "=== CIS hardening complete ==="
+}
+
+if [[ "${CIS_HARDENING_ENABLED:-false}" == "true" ]]; then
+  harden_cis || echo "WARN: CIS hardening did not complete cleanly - the runner is up regardless. See the log above / Log Analytics."
+else
+  echo "CIS hardening disabled (CIS_HARDENING_ENABLED='${CIS_HARDENING_ENABLED:-unset}') - skipping."
+fi
+
+# Record the version just completed. Matching this against the injected
+# BOOTSTRAP_VERSION is what lets an unchanged bootstrap skip and a bumped
+# one re-run on the next CustomScript execution (see the re-run guard at
+# the top). Falls back to a timestamp when run by hand with no version.
+mkdir -p "$(dirname "${BOOTSTRAP_SENTINEL}")"
+printf '%s\n' "${BOOTSTRAP_VERSION:-$(date -u +%FT%TZ)}" > "${BOOTSTRAP_SENTINEL}"
+
+echo "Bootstrap complete at $(date -u) (version ${BOOTSTRAP_VERSION:-n/a}). Runner ${INSTANCE_NAME} registered and running."
