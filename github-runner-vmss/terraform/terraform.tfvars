@@ -58,6 +58,7 @@ cis_hardening_level           = "level1" # or "level2"
 cis_hardening_manage_firewall = false    # true = CIS configures ufw; bootstrap re-adds the runner's egress rules
 cis_hardening_ref             = "1.6.0"  # pinned ansible-lockdown/UBUNTU24-CIS tag
 cis_hardening_skip_rules      = []       # extra ubtu24cis_rule_* vars to force off
+cis_audit_enabled             = true     # install /usr/local/sbin/cis-audit + scoped sudoers for the cis-benchmark.yml workflow
 
 
 # Azure Monitor Agent on the VMSS instances. On by default; ships syslog +

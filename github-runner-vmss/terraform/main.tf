@@ -348,6 +348,14 @@ resource "azurerm_virtual_machine_scale_set_extension" "bootstrap_devops_agent" 
     azurerm_private_endpoint.bootstrap_blob,
     azurerm_role_assignment.vmss_blob_reader,
     azurerm_role_assignment.pipeline_blob_reader,
-    azurerm_role_assignment.vmss_kv_secrets_user
+    azurerm_role_assignment.vmss_kv_secrets_user,
+    # provision_after_extensions names "AzureMonitorLinuxAgent", so that
+    # extension must already be on the VMSS extension profile before this
+    # one is PATCHed in - otherwise Azure 400s with "specifies
+    # 'AzureMonitorLinuxAgent' in its provisionAfterExtensions property,
+    # but the extension ... is not configured". The reference above is a
+    # bare string, not a TF address, so this dependency has to be
+    # explicit. Harmless no-op when monitoring is disabled (ama count 0).
+    azurerm_virtual_machine_scale_set_extension.ama,
   ]
 }

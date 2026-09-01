@@ -132,13 +132,27 @@ variable "cis_hardening_manage_firewall" {
 variable "cis_hardening_ref" {
   description = "Git ref (tag) of ansible-lockdown/UBUNTU24-CIS to pin. Bump deliberately after reviewing the changelog - never floats on a branch."
   type        = string
-  default     = "1.4.0"
+  default     = "1.6.0"
 }
 
 variable "cis_hardening_skip_rules" {
   description = "Extra ansible-lockdown rule variables to force off, e.g. [\"ubtu24cis_rule_1_1_2_1_2\"] to keep /tmp exec. Merged on top of the built-in runner-safe skip list in bootstrap_agent.sh."
   type        = list(string)
   default     = []
+}
+
+variable "cis_audit_enabled" {
+  description = <<-EOT
+    Install the `/usr/local/sbin/cis-audit` wrapper + a scoped
+    `/etc/sudoers.d` NOPASSWD entry for it, so the cis-benchmark.yml
+    GitHub workflow can score this host against the CIS Ubuntu 24.04
+    Benchmark (read-only, via ansible-lockdown/UBUNTU24-CIS-Audit +
+    goss). Off by default: it's a small privilege concession on a
+    hardened box (one fixed, self-validating command). The audit itself
+    changes nothing.
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "key_vault_name" {

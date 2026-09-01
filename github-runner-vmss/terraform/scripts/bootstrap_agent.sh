@@ -600,6 +600,110 @@ else
   echo "CIS hardening disabled (CIS_HARDENING_ENABLED='${CIS_HARDENING_ENABLED:-unset}') - skipping."
 fi
 
+# ---------------------------------------------------------------------
+# 9. CIS audit harness (optional)
+#
+# When CIS_AUDIT_ENABLED is "true" (var.cis_audit_enabled), install a
+# fixed, self-validating wrapper and a scoped sudoers entry so the
+# cis-benchmark.yml workflow can score this host against the CIS Ubuntu
+# 24.04 Benchmark. The audit is READ-ONLY - ansible-lockdown/
+# UBUNTU24-CIS-Audit + goss, the companion to the remediation role.
+# The sudoers grant is exactly one command that only ever runs goss and
+# writes reports to /var/lib/cis-audit.
+# ---------------------------------------------------------------------
+install_cis_audit() {
+  local wrapper=/usr/local/sbin/cis-audit
+  local sudoers=/etc/sudoers.d/90-cis-audit
+
+  install -d -m 0755 /var/lib/cis-audit
+
+  cat > "${wrapper}" <<'CISAUDIT'
+#!/usr/bin/env bash
+# Managed by bootstrap_agent.sh (var.cis_audit_enabled). READ-ONLY CIS
+# benchmark audit of this host via ansible-lockdown/UBUNTU24-CIS-Audit
+# (goss). Changes nothing; writes world-readable reports to
+# /var/lib/cis-audit/. Usage: cis-audit [level1|level2]  (default level1)
+set -euo pipefail
+
+LEVEL="${1:-level1}"
+case "${LEVEL}" in
+  level1|level2) ;;
+  *) echo "cis-audit: level must be 'level1' or 'level2'" >&2; exit 2 ;;
+esac
+[ "$(id -u)" -eq 0 ] || { echo "cis-audit: must run as root (via sudo)" >&2; exit 1; }
+
+GOSS_VERSION="v0.4.9"
+GOSS_SHA256="87dd36cfa1b8b50554e6e2ca29168272e26755b19ba5438341f7c66b36decc19"
+AUDIT_REF="benchmark_v1.0.0"
+AUDIT_DIR="/opt/UBUNTU24-CIS-Audit"
+OUT="/var/lib/cis-audit"
+export DEBIAN_FRONTEND=noninteractive
+mkdir -p "${OUT}"
+
+if ! /usr/local/bin/goss --version 2>/dev/null | grep -q "${GOSS_VERSION#v}"; then
+  t="$(mktemp)"
+  curl -fsSL -o "${t}" "https://github.com/goss-org/goss/releases/download/${GOSS_VERSION}/goss-linux-amd64"
+  echo "${GOSS_SHA256}  ${t}" | sha256sum -c - || { echo "cis-audit: goss checksum mismatch" >&2; rm -f "${t}"; exit 1; }
+  install -m 0755 "${t}" /usr/local/bin/goss; rm -f "${t}"
+fi
+command -v git >/dev/null || { apt-get update -qq && apt-get install -y -qq git; }
+command -v jq  >/dev/null || { apt-get update -qq && apt-get install -y -qq jq; }
+
+if [ -d "${AUDIT_DIR}/.git" ]; then
+  git -C "${AUDIT_DIR}" fetch -q --depth 1 origin "${AUDIT_REF}" && git -C "${AUDIT_DIR}" checkout -q FETCH_HEAD
+else
+  rm -rf "${AUDIT_DIR}"
+  git clone -q --depth 1 --branch "${AUDIT_REF}" \
+    https://github.com/ansible-lockdown/UBUNTU24-CIS-Audit.git "${AUDIT_DIR}"
+fi
+
+# Start from the audit's own vars, then layer the SAME runner-safe
+# opt-outs harden_cis() applied, so the audit doesn't fail controls we
+# deliberately skipped for the runner's sake.
+vars="${OUT}/audit-vars.yml"
+cp "${AUDIT_DIR}/vars/CIS.yml" "${vars}"
+{
+  echo ""
+  echo "ubtu24cis_level_1: true"
+  echo "ubtu24cis_level_2: $([ "${LEVEL}" = level2 ] && echo true || echo false)"
+  [ -f /etc/ghrunner/cis-overrides.yml ] && grep -E '^(ubtu24cis_|skip_reboot)' /etc/ghrunner/cis-overrides.yml || true
+} >> "${vars}"
+
+cd "${AUDIT_DIR}"
+AUDIT_BIN=/usr/local/bin/goss AUDIT_CONTENT_LOCATION=/opt \
+  ./run_audit.sh -f json -o "${OUT}/results.json" -v "${vars}" || true
+
+tc=$(jq -r '.summary."test-count" // 0' "${OUT}/results.json" 2>/dev/null || echo 0)
+fc=$(jq -r '.summary."failed-count" // 0' "${OUT}/results.json" 2>/dev/null || echo 0)
+sl=$(jq -r '.summary."summary-line" // ""' "${OUT}/results.json" 2>/dev/null || echo "")
+[ -n "${tc}" ] && [ "${tc}" -gt 0 ] 2>/dev/null || { echo "cis-audit: no goss results parsed - see ${OUT}/results.json" >&2; exit 1; }
+sk=$(printf '%s' "${sl}" | sed -n 's/.*Skipped: *\([0-9][0-9]*\).*/\1/p'); sk=${sk:-0}
+den=$(( tc - sk )); [ "${den}" -lt 1 ] && den="${tc}"
+pc=$(( tc - fc - sk )); [ "${pc}" -lt 0 ] && pc=0
+rate=$(( pc * 100 / den ))
+printf 'PROFILE=cis_%s_server\nWHEN=%s\nTOTAL=%s\nPASS=%s\nFAIL=%s\nSKIPPED=%s\nRATE=%s\n' \
+  "${LEVEL}" "$(date -u +%FT%TZ)" "${tc}" "${pc}" "${fc}" "${sk}" "${rate}" > "${OUT}/summary.env"
+chmod -R a+rX "${OUT}"
+echo "cis-audit: ${LEVEL} -> ${pc}/${den} passed (${rate}%), ${fc} failed, ${sk} skipped. Reports in ${OUT}/"
+CISAUDIT
+  chmod 0755 "${wrapper}"
+
+  # Exactly one command, no wildcards. The wrapper validates its own arg.
+  printf 'actions-runner ALL=(root) NOPASSWD: %s ""\nactions-runner ALL=(root) NOPASSWD: %s level1, %s level2\n' \
+    "${wrapper}" "${wrapper}" "${wrapper}" > "${sudoers}"
+  chmod 0440 "${sudoers}"
+  if ! visudo -cf "${sudoers}" >/dev/null 2>&1; then
+    echo "WARN: ${sudoers} failed visudo check - removing it"; rm -f "${sudoers}"; return 1
+  fi
+  echo "cis-audit harness installed (${wrapper} + ${sudoers})."
+}
+
+if [[ "${CIS_AUDIT_ENABLED:-false}" == "true" ]]; then
+  install_cis_audit || echo "WARN: cis-audit harness install failed - the cis-benchmark workflow won't work until this succeeds."
+else
+  echo "CIS audit harness disabled (CIS_AUDIT_ENABLED='${CIS_AUDIT_ENABLED:-unset}') - skipping."
+fi
+
 # Record the version just completed. Matching this against the injected
 # BOOTSTRAP_VERSION is what lets an unchanged bootstrap skip and a bumped
 # one re-run on the next CustomScript execution (see the re-run guard at

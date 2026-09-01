@@ -1256,12 +1256,26 @@ apply `main.tf` with `termination_notification` present. Worth knowing:
     deliberately after reading the changelog), `cis_hardening_skip_rules`
     (extra `ubtu24cis_rule_*` vars to force off). This module creates
     **no NSG**; your landing-zone subnet/NSG rules are unchanged.
+- **Scoring a runner against the benchmark**: set `cis_audit_enabled =
+  true` (default `false`), apply, and roll the VMSS. That installs
+  `/usr/local/sbin/cis-audit` (a fixed, self-validating wrapper that
+  runs the **read-only** [`ansible-lockdown/UBUNTU24-CIS-Audit`](https://github.com/ansible-lockdown/UBUNTU24-CIS-Audit)
+  goss checks, pinned) plus a `/etc/sudoers.d/90-cis-audit` NOPASSWD
+  entry for exactly `cis-audit level1` / `cis-audit level2` - the only
+  privilege concession, and the audit changes nothing. Then run the
+  **`CIS Benchmark (self-hosted runner)`** workflow
+  (`.github/workflows/cis-benchmark.yml`): pick `level1`/`level2` and a
+  `min_pass_rate`; it prints a pass-rate table + failing-check list to
+  the run summary, uploads `results.json`, and fails the job below the
+  threshold. It also runs weekly as a drift check. The audit layers the
+  same runner-safe opt-outs `harden_cis()` applied, so it doesn't flag
+  controls that were skipped on purpose.
 - **Re-running the bootstrap** (incl. re-applying hardening): the
   CustomScript guard is version-aware. `local.bootstrap_version`
   (`locals.tf`) is a hash of `bootstrap_agent.sh` **plus** every
-  `cis_hardening_*` input; each instance records the version it last
-  completed in `/var/lib/ghrunner/.bootstrapped`.
-  - Edit the script, or change any `cis_hardening_*` var, then
+  `cis_hardening_*` / `cis_audit_enabled` input; each instance records
+  the version it last completed in `/var/lib/ghrunner/.bootstrapped`.
+  - Edit the script, or change any `cis_hardening_*` / `cis_audit_*` var, then
     `terraform apply` - the new version lands in the VMSS model.
   - `upgrade_mode` is **Manual**, so push it to live instances with
     `az vmss update-instances --resource-group <rg> --name <vmss> --instance-ids '*'`

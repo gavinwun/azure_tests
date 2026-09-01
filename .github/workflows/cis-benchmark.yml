@@ -1,0 +1,115 @@
+name: CIS Benchmark (self-hosted runner)
+
+# Scores a self-hosted VMSS runner against the CIS Ubuntu 24.04 LTS
+# Benchmark and (optionally) fails if the pass rate is below a threshold.
+#
+# The audit is READ-ONLY: it runs ansible-lockdown/UBUNTU24-CIS-Audit
+# (goss) via the on-host wrapper /usr/local/sbin/cis-audit, which the
+# runner's bootstrap installs ONLY when Terraform sets
+# `cis_audit_enabled = true`. If it isn't there, this workflow tells you
+# what to flip and stops.
+#
+# The hardening itself is applied at first boot by bootstrap_agent.sh
+# (`cis_hardening_enabled`, default true) - this job just measures it.
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "CIS profile to score against"
+        type: choice
+        default: level1
+        options: [level1, level2]
+      min_pass_rate:
+        description: "Fail the job if the pass rate (%) is below this. 0 = report only."
+        type: string
+        default: "90"
+      pool:
+        description: "Runner pool label"
+        type: choice
+        default: vmss
+        options: [vmss]
+  schedule:
+    - cron: "30 7 * * 1"   # 07:30 UTC Monday - weekly drift check
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cis-benchmark-${{ github.ref }}-${{ github.event.inputs.pool || 'vmss' }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - ${{ github.event.inputs.pool || 'vmss' }}
+    timeout-minutes: 20
+    env:
+      LEVEL: ${{ github.event.inputs.level || 'level1' }}
+      MIN_PASS_RATE: ${{ github.event.inputs.min_pass_rate || '90' }}
+    steps:
+      - name: Preflight - audit harness present
+        run: |
+          echo "Runner : ${RUNNER_NAME}  ($(. /etc/os-release; echo "$PRETTY_NAME"), $(uname -m))"
+          if [ ! -x /usr/local/sbin/cis-audit ]; then
+            echo "::error::/usr/local/sbin/cis-audit is missing on this runner."
+            echo "Set 'cis_audit_enabled = true' in terraform.tfvars, apply, then roll the VMSS"
+            echo "(az vmss update-instances ... / reimage) so instances pick up the new bootstrap."
+            exit 1
+          fi
+          case "${LEVEL}" in level1|level2) ;; *) echo "::error::level must be level1 or level2"; exit 1 ;; esac
+
+      - name: Run CIS audit (read-only)
+        run: sudo -n /usr/local/sbin/cis-audit "${LEVEL}"
+
+      - name: Summary + gate
+        run: |
+          set -a; . /var/lib/cis-audit/summary.env; set +a
+          {
+            echo "## CIS ${LEVEL} audit - ${RUNNER_NAME}"
+            echo ""
+            echo "| Metric | Value |"
+            echo "|---|---|"
+            echo "| Profile | \`${PROFILE}\` |"
+            echo "| Checks passed | ${PASS} / $((TOTAL - SKIPPED)) |"
+            echo "| Failed | ${FAIL} |"
+            echo "| Skipped (out of scope) | ${SKIPPED} |"
+            echo "| Pass rate | **${RATE}%** |"
+            echo "| Threshold | ${MIN_PASS_RATE}% |"
+            echo "| Run at (UTC) | ${WHEN} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Top failing rule ids, for a quick look without downloading the artifact.
+          if command -v jq >/dev/null 2>&1 && [ -f /var/lib/cis-audit/results.json ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "<details><summary>Failing checks</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.results[]? | select(.successful==false)
+                   | ((."resource-type"//"?") + "  " + (."resource-id"//"?") + "  (" + (.property//"?") + ")")' \
+              /var/lib/cis-audit/results.json 2>/dev/null | sort -u | head -100 >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          mkdir -p _cis_report
+          cp -f /var/lib/cis-audit/results.json /var/lib/cis-audit/summary.env \
+                /var/lib/cis-audit/audit-vars.yml _cis_report/ 2>/dev/null || true
+
+          echo "Pass rate ${RATE}% (threshold ${MIN_PASS_RATE}%)"
+          if [ "${MIN_PASS_RATE}" -gt 0 ] 2>/dev/null && [ "${RATE:-0}" -lt "${MIN_PASS_RATE}" ]; then
+            echo "::error::CIS ${LEVEL} pass rate ${RATE}% is below the ${MIN_PASS_RATE}% threshold."
+            exit 1
+          fi
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cis-${{ env.LEVEL }}-${{ github.run_id }}
+          path: _cis_report/
+          if-no-files-found: warn
+          retention-days: 30

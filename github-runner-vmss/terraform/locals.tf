@@ -37,6 +37,7 @@ locals {
     tostring(var.cis_hardening_manage_firewall),
     var.cis_hardening_ref,
     join(",", var.cis_hardening_skip_rules),
+    tostring(var.cis_audit_enabled),
   ])), 0, 16)
 
   # ---------------------------------------------------------------------
@@ -93,6 +94,7 @@ locals {
     export CIS_HARDENING_MANAGE_FIREWALL="${var.cis_hardening_manage_firewall}"
     export CIS_HARDENING_REF="${var.cis_hardening_ref}"
     export CIS_HARDENING_SKIP_RULES="${join(" ", var.cis_hardening_skip_rules)}"
+    export CIS_AUDIT_ENABLED="${var.cis_audit_enabled}"
 
     SCRIPT_URL="${local.bootstrap_agent_url}"
     TOKEN_URI="http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fstorage.azure.com%2F"
