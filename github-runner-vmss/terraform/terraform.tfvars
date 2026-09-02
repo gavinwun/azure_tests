@@ -99,11 +99,21 @@ cis_hardening_skip_rules = [
   #    rsyslog or cutting the journald->syslog forward blinds that path.
   "ubtu24cis_rule_6_1_1_4", "ubtu24cis_rule_6_1_2_2",
 
-  # -- §6.1.2.1.1 / §6.1.2.1.3 - systemd-journal-remote/-upload as a log
-  #    *shipping client*. We don't push the journal to a remote
+  # -- §6.1.2.1.1 / §6.1.2.1.2 / §6.1.2.1.3 - systemd-journal-remote/-upload
+  #    as a log *shipping client*. We don't push the journal to a remote
   #    collector; the remote units are masked instead (§6.1.2.1.4, which
-  #    the backstop in bootstrap_agent.sh enforces).
-  "ubtu24cis_rule_6_1_2_1_1", "ubtu24cis_rule_6_1_2_1_3",
+  #    the backstop in bootstrap_agent.sh enforces). 6.1.2.1.2's PATCH
+  #    task also HARD-FAILS the ansible run ("Destination
+  #    /etc/systemd/journal-upload.conf does not exist") because the
+  #    package isn't installed - this is the last `failed=1` in the role.
+  "ubtu24cis_rule_6_1_2_1_1", "ubtu24cis_rule_6_1_2_1_2", "ubtu24cis_rule_6_1_2_1_3",
+
+  # -- §5.1.17 sshd MaxSessions. The system is compliant (MaxSessions 10,
+  #    the CIS recommendation) but the audit's goss check has an
+  #    unanchored negative regex - `!/^MaxSessions (1|1[1-9]|...)/` also
+  #    matches the leading "1" of "10", so the correct value can never
+  #    pass. Scoped out as an audit-tool bug, not a real gap.
+  "ubtu24cis_rule_5_1_17",
 ]
 
 

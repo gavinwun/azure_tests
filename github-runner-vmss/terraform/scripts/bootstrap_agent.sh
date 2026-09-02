@@ -973,9 +973,11 @@ printf 'PROFILE=cis_%s_server\nWHEN=%s\nTOTAL=%s\nPASS=%s\nFAIL=%s\nSKIPPED=%s\n
   cp -f /var/log/cloud-init-output.log    "${DIAG}/" 2>/dev/null
   cloud-init status --long > "${DIAG}/cloud-init-status.txt" 2>/dev/null
 
-  # hardening state + the exact vars each side used
-  cp -f /var/lib/ghrunner/.hardened /var/lib/ghrunner/.bootstrapped \
-        /etc/ghrunner/cis-overrides.yml "${DIAG}/" 2>/dev/null
+  # hardening state + the exact vars each side used (copy under non-dot
+  # names so an empty/missing dotfile is obvious in the bundle listing)
+  cp -f /var/lib/ghrunner/.hardened    "${DIAG}/hardened.txt"    2>/dev/null || echo "(no /var/lib/ghrunner/.hardened)"    > "${DIAG}/hardened.txt"
+  cp -f /var/lib/ghrunner/.bootstrapped "${DIAG}/bootstrapped.txt" 2>/dev/null || echo "(no /var/lib/ghrunner/.bootstrapped)" > "${DIAG}/bootstrapped.txt"
+  cp -f /etc/ghrunner/cis-overrides.yml "${DIAG}/" 2>/dev/null
 
   # system context - explains the partition + logging skips at a glance
   {

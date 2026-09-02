@@ -107,8 +107,8 @@ jobs:
           # whether harden_cis() actually converged without SSHing in.
           DIAG=/var/lib/cis-audit/diag
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          if [ -f "$DIAG/.hardened" ]; then
-            echo "**CIS hardening marker:** \`$(cat "$DIAG/.hardened")\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$DIAG/hardened.txt" ]; then
+            echo "**CIS hardening marker:** \`$(cat "$DIAG/hardened.txt")\`" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "**CIS hardening marker:** _absent_ - harden_cis() did not reach its final step on this instance." >> "$GITHUB_STEP_SUMMARY"
           fi
