@@ -540,6 +540,20 @@ harden_cis() {
 
   echo "--- ${vars_file} ---"; sed 's/^/  /' "${vars_file}"; echo "--------------------"
 
+  # ---- prerequisite: /run/sshd -------------------------------------
+  #
+  # ansible-lockdown's 5.1.x sshd tasks validate every edit with
+  # `sshd -t`, which needs the privilege-separation dir /run/sshd. On a
+  # fresh CustomScript boot the ssh unit is often still inactive and
+  # /run/sshd (tmpfs, made by ssh.service / systemd-tmpfiles) does not
+  # exist yet - so 5.1.5 dies with
+  #   "failed to validate: Missing privilege separation directory: /run/sshd"
+  # and the role's linear play STOPS there, silently skipping the rest of
+  # 5.1, all of 5.3 (PAM) and 5.4. Create it now and make it survive a
+  # reboot.
+  install -d -m 0755 /run/sshd
+  printf 'd /run/sshd 0755 root root -\n' > /etc/tmpfiles.d/sshd-runner.conf
+
   # ---- run it: this host only, local connection ---------------------
   #
   # --force-handlers: the role queues restarts/reloads (sshd, sysctl,
@@ -640,18 +654,26 @@ enforce_runner_safe_cis() (
   set +e   # subshell: assert as much as possible, never abort the bootstrap
   echo "=== Runner-safe CIS backstop: asserting file/sysctl/unit controls ==="
 
+  # sshd's 5.1.x validate step (role AND the block below) needs this dir;
+  # ssh is often still inactive here so it isn't created yet.
+  install -d -m 0755 /run/sshd
+
   # -- §3.3 IPv6 router-adverts / redirects / source-route. The fleet is
   #    IPv4-only for egress, so switching these off changes nothing that
-  #    the runner depends on.
-  cat > /etc/sysctl.d/60-cis-runner.conf <<'SYSCTL'
-# CIS 3.3.5 / 3.3.8 / 3.3.9 / 3.3.11 - asserted by bootstrap_agent.sh
-net.ipv6.conf.all.accept_ra = 0
-net.ipv6.conf.default.accept_ra = 0
-net.ipv6.conf.all.accept_redirects = 0
-net.ipv6.conf.default.accept_redirects = 0
-net.ipv6.conf.all.accept_source_route = 0
-net.ipv6.conf.default.accept_source_route = 0
-SYSCTL
+  #    the runner depends on. Written to the drop-in dir AND appended to
+  #    the file the role/audit grep (ubtu24cis_sysctl_network_conf,
+  #    default /etc/sysctl.conf), then applied live.
+  _ipv6_keys='net.ipv6.conf.all.accept_ra net.ipv6.conf.default.accept_ra net.ipv6.conf.all.accept_redirects net.ipv6.conf.default.accept_redirects net.ipv6.conf.all.accept_source_route net.ipv6.conf.default.accept_source_route'
+  {
+    echo "# CIS 3.3.5 / 3.3.8 / 3.3.9 / 3.3.11 - asserted by bootstrap_agent.sh"
+    for _k in ${_ipv6_keys}; do echo "${_k} = 0"; done
+  } > /etc/sysctl.d/60-cis-runner.conf
+  if [[ -f /etc/sysctl.conf ]]; then
+    _ipv6_re="$(echo "${_ipv6_keys}" | tr ' ' '|' | sed 's/\./\\./g')"
+    sed -ri "\\@^[[:space:]]*#?[[:space:]]*(${_ipv6_re})[[:space:]]*=@d" /etc/sysctl.conf
+    { echo "# CIS 3.3.x - asserted by bootstrap_agent.sh"; for _k in ${_ipv6_keys}; do echo "${_k} = 0"; done; } >> /etc/sysctl.conf
+  fi
+  for _k in ${_ipv6_keys}; do sysctl -w "${_k}=0" >/dev/null 2>&1; done
   sysctl --system >/dev/null 2>&1
 
   # -- §6.1.1.3 / §6.1.2.3 / §6.1.2.4 journald Storage / Compress /
@@ -679,10 +701,10 @@ JRNL
   #    pwquality.conf is inert until pam_pwquality is in common-password;
   #    it cannot block a login on its own.
   apt_get install -y libpam-pwquality || echo "WARN: libpam-pwquality install failed"
-  pwq=/etc/security/pwquality.conf
-  if [[ -f "${pwq}" ]]; then
-    sed -ri '/^[[:space:]]*#?[[:space:]]*(difok|minlen|dcredit|ucredit|lcredit|ocredit|minclass|maxrepeat|maxsequence|dictcheck|enforcing|enforce_for_root|retry)\b/d' "${pwq}"
-    cat >> "${pwq}" <<'PWQ'
+  # Write the values to BOTH the flat file and the drop-in dir - the goss
+  # audit greps pwquality.conf.d/*.conf for some 5.3.3.2.x checks.
+  mkdir -p /etc/security/pwquality.conf.d
+  cat > /etc/security/pwquality.conf.d/60-cis-runner.conf <<'PWQ'
 # CIS 5.3.3.2.x - asserted by bootstrap_agent.sh enforce_runner_safe_cis()
 difok = 2
 minlen = 14
@@ -698,6 +720,10 @@ enforcing = 1
 enforce_for_root
 retry = 3
 PWQ
+  pwq=/etc/security/pwquality.conf
+  if [[ -f "${pwq}" ]]; then
+    sed -ri '/^[[:space:]]*#?[[:space:]]*(difok|minlen|dcredit|ucredit|lcredit|ocredit|minclass|maxrepeat|maxsequence|dictcheck|enforcing|enforce_for_root|retry)\b/d' "${pwq}"
+    cat /etc/security/pwquality.conf.d/60-cis-runner.conf >> "${pwq}"
   fi
 
   # -- §5.3.3.1.x faillock thresholds. Inert until pam_faillock is wired
