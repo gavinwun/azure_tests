@@ -686,6 +686,16 @@ fi
 { echo ""; cat "${overrides}"; } >> "${vars}"
 rm -f "${overrides}"
 
+# Upstream vars/CIS.yml ships list entries like ubtu24cis_time_pool with
+# a bare '- name: x' and no 'options:' sibling; goss templates such as
+# cis_2.3.3.1.yml dereference .options on every entry unconditionally
+# and hard-fail the whole run ("map has no entry for key \"options\"")
+# if it's missing. Backfill a default wherever it's absent.
+sed -i -E '/^([[:space:]]*)-[[:space:]]*name:[[:space:]]*[^[:space:]]+[[:space:]]*$/{
+  N
+  /\n[[:space:]]*options:/!s/^([[:space:]]*)(-[[:space:]]*name:[[:space:]]*[^[:space:]]+[[:space:]]*)\n/\1\2\n\1  options: iburst maxsources 4\n/
+}' "${vars}"
+
 cd "${AUDIT_DIR}"
 AUDIT_BIN=/usr/local/bin/goss AUDIT_CONTENT_LOCATION=/opt \
   ./run_audit.sh -f json -o "${OUT}/results.json" -v "${vars}" || true
