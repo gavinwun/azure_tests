@@ -57,8 +57,54 @@ cis_hardening_enabled         = true
 cis_hardening_level           = "level1" # or "level2"
 cis_hardening_manage_firewall = false    # true = CIS configures ufw; bootstrap re-adds the runner's egress rules
 cis_hardening_ref             = "1.6.0"  # pinned ansible-lockdown/UBUNTU24-CIS tag
-cis_hardening_skip_rules      = []       # extra ubtu24cis_rule_* vars to force off
 cis_audit_enabled             = true     # install /usr/local/sbin/cis-audit + scoped sudoers for the cis-benchmark.yml workflow
+
+# Controls forced off in BOTH the hardening role and the read-only audit
+# (bootstrap_agent.sh writes each as `ubtu24cis_rule_*: false` into
+# /etc/ghrunner/cis-overrides.yml, which install_cis_audit() also feeds to
+# goss). Every entry here is a control that either cannot hold on a
+# single-disk ephemeral VMSS instance, or that would blind the fleet -
+# not strict-CIS ticks we're giving up for convenience.
+cis_hardening_skip_rules = [
+  # -- §1.1.2 separate-partition isolation (nodev/nosuid/noexec on their
+  #    own filesystems). The instance has one OS disk and no data disks;
+  #    carving /var, /var/log, /var/log/audit etc. off risks a full
+  #    /var/log wedging the box or a size-capped /tmp breaking large
+  #    checkouts. /tmp + /dev/shm still get nodev/nosuid via the existing
+  #    tmp.mount drop-in; only the "must be its own partition" variants
+  #    are dropped here.
+  "ubtu24cis_rule_1_1_2_1_1", "ubtu24cis_rule_1_1_2_1_2", "ubtu24cis_rule_1_1_2_1_3",
+  "ubtu24cis_rule_1_1_2_2_2", "ubtu24cis_rule_1_1_2_2_3",
+  "ubtu24cis_rule_1_1_2_3_2", "ubtu24cis_rule_1_1_2_3_3",
+  "ubtu24cis_rule_1_1_2_4_2", "ubtu24cis_rule_1_1_2_4_3",
+  "ubtu24cis_rule_1_1_2_5_2", "ubtu24cis_rule_1_1_2_5_3",
+  "ubtu24cis_rule_1_1_2_6_2", "ubtu24cis_rule_1_1_2_6_3", "ubtu24cis_rule_1_1_2_6_4",
+  "ubtu24cis_rule_1_1_2_7_2", "ubtu24cis_rule_1_1_2_7_3", "ubtu24cis_rule_1_1_2_7_4",
+
+  # -- §1.4.1 GRUB bootloader password. No serial/console to a VMSS
+  #    instance and the OS is rebuilt from the image on every scale
+  #    event; a GRUB password guards nothing here and a bad hash bricks
+  #    the boot.
+  "ubtu24cis_rule_1_4_1",
+
+  # -- §5.4.2.4 "root account access is controlled" - the audit's check
+  #    wants a *set* root password. Azure VMSS locks the root password
+  #    (key-only admin user); a locked root is the controlled state.
+  "ubtu24cis_rule_5_4_2_4",
+
+  # -- §6.1.1.4 / §6.1.2.2 - "only journald OR rsyslog, not both" and
+  #    journald ForwardToSyslog=no. This fleet is observed without SSH by
+  #    shipping bootstrap + OS syslog through rsyslog -> Azure Monitor
+  #    Agent -> Log Analytics (see terraform/monitoring.tf). Stopping
+  #    rsyslog or cutting the journald->syslog forward blinds that path.
+  "ubtu24cis_rule_6_1_1_4", "ubtu24cis_rule_6_1_2_2",
+
+  # -- §6.1.2.1.1 / §6.1.2.1.3 - systemd-journal-remote/-upload as a log
+  #    *shipping client*. We don't push the journal to a remote
+  #    collector; the remote units are masked instead (§6.1.2.1.4, which
+  #    the backstop in bootstrap_agent.sh enforces).
+  "ubtu24cis_rule_6_1_2_1_1", "ubtu24cis_rule_6_1_2_1_3",
+]
 
 
 # Azure Monitor Agent on the VMSS instances. On by default; ships syslog +

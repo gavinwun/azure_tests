@@ -1288,3 +1288,7 @@ apply `main.tf` with `termination_notification` present. Worth knowing:
   - Force a one-off re-run on a single box: `sudo rm
     /var/lib/ghrunner/.bootstrapped /var/lib/ghrunner/.hardened` then
     reimage it or `az vmss update-instances` that instance id.
+
+
+## Reference 
+https://www.cisecurity.org/benchmark/ubuntu_linux

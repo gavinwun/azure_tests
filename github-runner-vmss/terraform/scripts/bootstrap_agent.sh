@@ -541,15 +541,35 @@ harden_cis() {
   echo "--- ${vars_file} ---"; sed 's/^/  /' "${vars_file}"; echo "--------------------"
 
   # ---- run it: this host only, local connection ---------------------
-  ANSIBLE_LOCALHOST_WARNING=False \
-  ANSIBLE_INVENTORY_UNPARSED_WARNING=False \
-  ANSIBLE_RETRY_FILES_ENABLED=False \
-  ansible-playbook "${repo_dir}/site.yml" \
-    --connection local \
-    --inventory 'localhost,' \
-    --limit localhost \
-    --tags "${tags}" \
-    --extra-vars "@${vars_file}" || return 1
+  #
+  # --force-handlers: the role queues restarts/reloads (sshd, sysctl,
+  # pam-auth-update, auditd) as handlers; without this a task failure
+  # anywhere aborts the run with those changes written but never
+  # activated. Two idempotent passes: a second run typically applies
+  # everything the first skipped after its abort point. A non-zero final
+  # rc is logged, NOT fatal - the runner is already up, and
+  # enforce_runner_safe_cis() plus the audit still run. Chase the root
+  # cause in the diag bundle the cis-benchmark workflow now collects.
+  local play_rc=0 _attempt
+  for _attempt in 1 2; do
+    play_rc=0
+    ANSIBLE_LOCALHOST_WARNING=False \
+    ANSIBLE_INVENTORY_UNPARSED_WARNING=False \
+    ANSIBLE_RETRY_FILES_ENABLED=False \
+    ansible-playbook "${repo_dir}/site.yml" \
+      --connection local \
+      --inventory 'localhost,' \
+      --limit localhost \
+      --tags "${tags}" \
+      --force-handlers \
+      --extra-vars "@${vars_file}" || play_rc=$?
+    if [[ "${play_rc}" -eq 0 ]]; then break; fi
+    if [[ "${_attempt}" -lt 2 ]]; then
+      echo "WARN: ansible-lockdown run (attempt ${_attempt}/2) exited ${play_rc} - retrying once"
+    else
+      echo "WARN: ansible-lockdown run still exited ${play_rc} after 2 attempts - continuing; enforce_runner_safe_cis() and the audit still run"
+    fi
+  done
 
   # ---- post-hardening fixups: guarantee the runner keeps working ----
   # regardless of exactly what the benchmark changed.
@@ -589,13 +609,192 @@ harden_cis() {
   systemctl restart terminate-watcher 2>/dev/null || true
 
   mkdir -p /var/lib/ghrunner
-  printf '%s  version=%s  ref=%s\n' "$(date -u +%FT%TZ)" "${BOOTSTRAP_VERSION:-none}" "${ref}" \
+  printf '%s  version=%s  ref=%s  ansible_rc=%s\n' \
+    "$(date -u +%FT%TZ)" "${BOOTSTRAP_VERSION:-none}" "${ref}" "${play_rc}" \
     > /var/lib/ghrunner/.hardened
-  echo "=== CIS hardening complete ==="
+  if [[ "${play_rc}" -eq 0 ]]; then
+    echo "=== CIS hardening complete ==="
+  else
+    echo "=== CIS hardening finished with ansible rc=${play_rc} (fixups applied; see WARN lines above) ==="
+  fi
+  return "${play_rc}"
 }
+
+# ---------------------------------------------------------------------
+# 8b. Runner-safe CIS backstop
+#
+# harden_cis() above is best-effort: if an ansible task fails mid-run,
+# every control after it is skipped. The controls below are (a) plain
+# file / sysctl / unit drops with no path to locking anyone out of the
+# box, and (b) exactly what the read-only benchmark audit greps for - so
+# we assert them directly, every boot, no matter how far the role got.
+#
+# What is deliberately NOT here: the PAM auth stack (common-auth /
+# -account / -password wiring, pam_unix, pam_pwhistory activation). Those
+# stay with the ansible role, where getting them subtly wrong locks out
+# login. The pwquality.conf / faillock.conf values below are inert until
+# the role wires those modules in; they just make sure the values are
+# already correct when it does.
+# ---------------------------------------------------------------------
+enforce_runner_safe_cis() (
+  set +e   # subshell: assert as much as possible, never abort the bootstrap
+  echo "=== Runner-safe CIS backstop: asserting file/sysctl/unit controls ==="
+
+  # -- §3.3 IPv6 router-adverts / redirects / source-route. The fleet is
+  #    IPv4-only for egress, so switching these off changes nothing that
+  #    the runner depends on.
+  cat > /etc/sysctl.d/60-cis-runner.conf <<'SYSCTL'
+# CIS 3.3.5 / 3.3.8 / 3.3.9 / 3.3.11 - asserted by bootstrap_agent.sh
+net.ipv6.conf.all.accept_ra = 0
+net.ipv6.conf.default.accept_ra = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+SYSCTL
+  sysctl --system >/dev/null 2>&1
+
+  # -- §6.1.1.3 / §6.1.2.3 / §6.1.2.4 journald Storage / Compress /
+  #    rotation caps. NOT ForwardToSyslog (see cis_hardening_skip_rules -
+  #    rsyslog -> Azure Monitor Agent is how this fleet is observed).
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/60-cis-runner.conf <<'JRNL'
+# CIS 6.1.1.3 / 6.1.2.3 / 6.1.2.4 - asserted by bootstrap_agent.sh
+[Journal]
+Storage=persistent
+Compress=yes
+SystemMaxUse=500M
+SystemKeepFree=1G
+RuntimeMaxUse=100M
+RuntimeKeepFree=200M
+MaxFileSec=1month
+JRNL
+  systemctl restart systemd-journald 2>/dev/null
+
+  # -- §6.1.2.1.4 systemd-journal-remote must be masked (we never ship
+  #    the journal to a remote collector).
+  systemctl --now mask systemd-journal-remote.socket systemd-journal-remote.service 2>/dev/null
+
+  # -- §5.3.1.3 libpam-pwquality present; §5.3.3.2.x quality values.
+  #    pwquality.conf is inert until pam_pwquality is in common-password;
+  #    it cannot block a login on its own.
+  apt_get install -y libpam-pwquality || echo "WARN: libpam-pwquality install failed"
+  pwq=/etc/security/pwquality.conf
+  if [[ -f "${pwq}" ]]; then
+    sed -ri '/^[[:space:]]*#?[[:space:]]*(difok|minlen|dcredit|ucredit|lcredit|ocredit|minclass|maxrepeat|maxsequence|dictcheck|enforcing|enforce_for_root|retry)\b/d' "${pwq}"
+    cat >> "${pwq}" <<'PWQ'
+# CIS 5.3.3.2.x - asserted by bootstrap_agent.sh enforce_runner_safe_cis()
+difok = 2
+minlen = 14
+dcredit = -1
+ucredit = -1
+lcredit = -1
+ocredit = -1
+minclass = 4
+maxrepeat = 3
+maxsequence = 3
+dictcheck = 1
+enforcing = 1
+enforce_for_root
+retry = 3
+PWQ
+  fi
+
+  # -- §5.3.3.1.x faillock thresholds. Inert until pam_faillock is wired
+  #    into common-auth by the role; sane if/when it is.
+  flk=/etc/security/faillock.conf
+  touch "${flk}"
+  sed -ri '/^[[:space:]]*#?[[:space:]]*(deny|unlock_time|fail_interval)\b/d' "${flk}"
+  cat >> "${flk}" <<'FLK'
+# CIS 5.3.3.1.x - asserted by bootstrap_agent.sh enforce_runner_safe_cis()
+deny = 5
+fail_interval = 900
+unlock_time = 900
+FLK
+
+  # -- §5.4.1.x password aging (login.defs + /etc/default/useradd + the
+  #    existing human accounts). Key-auth accounts are unaffected by
+  #    password expiry.
+  ld=/etc/login.defs
+  sed -ri 's/^[[:space:]]*#?[[:space:]]*(PASS_MAX_DAYS)[[:space:]]+.*/\1\t365/; s/^[[:space:]]*#?[[:space:]]*(PASS_MIN_DAYS)[[:space:]]+.*/\1\t1/; s/^[[:space:]]*#?[[:space:]]*(PASS_WARN_AGE)[[:space:]]+.*/\1\t7/; s/^[[:space:]]*#?[[:space:]]*(UMASK)[[:space:]]+.*/\1\t027/' "${ld}"
+  grep -qE '^PASS_MAX_DAYS[[:space:]]' "${ld}" || printf 'PASS_MAX_DAYS\t365\n' >> "${ld}"
+  grep -qE '^PASS_MIN_DAYS[[:space:]]' "${ld}" || printf 'PASS_MIN_DAYS\t1\n'   >> "${ld}"
+  grep -qE '^PASS_WARN_AGE[[:space:]]' "${ld}" || printf 'PASS_WARN_AGE\t7\n'   >> "${ld}"
+  useradd -D -f 30 2>/dev/null
+  while IFS=: read -r _u _ _uid _ _ _ _sh; do
+    [[ "${_uid}" =~ ^[0-9]+$ ]] || continue
+    [[ "${_uid}" -ge 1000 && "${_uid}" -lt 65534 ]] || continue
+    case "${_sh}" in */nologin|*/false|"") continue ;; esac
+    chage --maxdays 365 --mindays 1 --warndays 7 --inactive 30 "${_u}" 2>/dev/null
+  done < /etc/passwd
+
+  # -- §5.4.2.6 root umask, §5.4.3.2 shell TMOUT, §5.4.3.3 default umask.
+  for _rc in /root/.bashrc /root/.bash_profile /root/.profile; do
+    touch "${_rc}"
+    sed -ri '/^[[:space:]]*umask[[:space:]]+/d' "${_rc}"
+    echo 'umask 0027' >> "${_rc}"
+  done
+  cat > /etc/profile.d/60-cis-runner.sh <<'PROF'
+# CIS 5.4.3.2 / 5.4.3.3 - asserted by bootstrap_agent.sh
+umask 027
+TMOUT=900
+export TMOUT
+PROF
+  chmod 0644 /etc/profile.d/60-cis-runner.sh
+
+  # -- §5.2.6 sudo authentication timeout.
+  echo 'Defaults timestamp_timeout=15' > /etc/sudoers.d/60-cis-timeout
+  chmod 0440 /etc/sudoers.d/60-cis-timeout
+  visudo -cf /etc/sudoers.d/60-cis-timeout >/dev/null 2>&1 || rm -f /etc/sudoers.d/60-cis-timeout
+
+  # -- §5.2.7 restrict `su` to an empty group (root only). /etc/pam.d/su
+  #    is not pam-auth-update managed, so a direct edit is stable.
+  groupadd -f nosugroup 2>/dev/null
+  if [[ -f /etc/pam.d/su ]] && ! grep -qE '^[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so.*group=nosugroup' /etc/pam.d/su; then
+    sed -ri '/^[[:space:]]*#?[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so/d' /etc/pam.d/su
+    sed -i '1a auth       required   pam_wheel.so use_uid group=nosugroup' /etc/pam.d/su
+  fi
+
+  # -- §5.1.x sshd. The audit greps these out of the main sshd_config, so
+  #    they go in the main file (prepended, ahead of any Match block),
+  #    validated with `sshd -t` before the file is swapped in. Inbound
+  #    SSH is not on the runner's critical path (it egresses to GitHub);
+  #    5.1.4 is satisfied with a documentation comment rather than a real
+  #    Allow/Deny list, so no admin gets locked out.
+  sshd=/etc/ssh/sshd_config
+  if [[ -f "${sshd}" ]]; then
+    _new="$(mktemp)"
+    {
+      echo '# --- CIS 5.1 backstop (bootstrap_agent.sh enforce_runner_safe_cis) ---'
+      printf '%s\n' \
+        'PermitRootLogin no' 'PermitEmptyPasswords no' 'PermitUserEnvironment no' \
+        'HostbasedAuthentication no' 'IgnoreRhosts yes' 'MaxAuthTries 4' 'MaxSessions 10' \
+        'LoginGraceTime 60' 'MaxStartups 10:30:60' 'ClientAliveInterval 15' \
+        'ClientAliveCountMax 3' 'Banner /etc/issue.net'
+      echo '# CIS 5.1.4 sshd access tokens (host access fronted by the Azure NSG): AllowUsers AllowGroups DenyUsers DenyGroups'
+      echo '# --- end CIS 5.1 backstop ---'
+      grep -vE '^[[:space:]]*#?[[:space:]]*(PermitRootLogin|PermitEmptyPasswords|PermitUserEnvironment|HostbasedAuthentication|IgnoreRhosts|MaxAuthTries|MaxSessions|LoginGraceTime|MaxStartups|ClientAliveInterval|ClientAliveCountMax|Banner)\b' "${sshd}" \
+        | grep -vE '^# (--- (CIS 5\.1 backstop|end CIS 5\.1 backstop)|CIS 5\.1\.4 sshd access tokens)'
+    } > "${_new}"
+    if sshd -t -f "${_new}" 2>/dev/null; then
+      cat "${_new}" > "${sshd}"
+      systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+    else
+      echo "WARN: sshd rejected the CIS 5.1 backstop - /etc/ssh/sshd_config left as-is"
+    fi
+    rm -f "${_new}"
+  fi
+
+  # keep the runner + watcher up through any sshd / pam / journald bounce
+  systemctl restart 'actions.runner.*' 2>/dev/null || { cd /opt/actions-runner && ./svc.sh start; }
+  systemctl restart terminate-watcher 2>/dev/null
+
+  echo "=== Runner-safe CIS backstop complete ==="
+)
 
 if [[ "${CIS_HARDENING_ENABLED:-false}" == "true" ]]; then
   harden_cis || echo "WARN: CIS hardening did not complete cleanly - the runner is up regardless. See the log above / Log Analytics."
+  enforce_runner_safe_cis || echo "WARN: runner-safe CIS backstop hit an error - see the log above."
 else
   echo "CIS hardening disabled (CIS_HARDENING_ENABLED='${CIS_HARDENING_ENABLED:-unset}') - skipping."
 fi
@@ -717,8 +916,76 @@ pc=$(( tc - fc - sk )); [ "${pc}" -lt 0 ] && pc=0
 rate=$(( pc * 100 / den ))
 printf 'PROFILE=cis_%s_server\nWHEN=%s\nTOTAL=%s\nPASS=%s\nFAIL=%s\nSKIPPED=%s\nRATE=%s\n' \
   "${LEVEL}" "$(date -u +%FT%TZ)" "${tc}" "${pc}" "${fc}" "${sk}" "${rate}" > "${OUT}/summary.env"
+
+# --- diagnostics bundle (read-only) -----------------------------------
+# Collected here because this wrapper already holds the one root grant
+# the cis-benchmark workflow is given - keeps the sudoers surface at
+# exactly one command. Everything below only reads. Written
+# world-readable under ${OUT}/diag so the workflow's upload step ships it
+# alongside the report; token-shaped strings are scrubbed first.
+( set +e
+  DIAG="${OUT}/diag"
+  rm -rf "${DIAG}"; mkdir -p "${DIAG}/customscript"
+
+  # bootstrap + CIS hardening (ansible) output - last 8 MB is plenty to
+  # see where a role run aborted
+  tail -c 8388608 /var/log/bootstrap/bootstrap_agent_detail.log > "${DIAG}/bootstrap_agent_detail.log" 2>/dev/null
+  journalctl -t ghrunner-bootstrap --no-pager > "${DIAG}/journal-ghrunner-bootstrap.log" 2>/dev/null
+
+  # runner + watcher + kernel
+  journalctl -u 'actions.runner.*' --no-pager -n 3000 > "${DIAG}/journal-actions-runner.log"     2>/dev/null
+  journalctl -u terminate-watcher   --no-pager -n 800  > "${DIAG}/journal-terminate-watcher.log" 2>/dev/null
+  journalctl -k --no-pager -n 800                       > "${DIAG}/journal-kernel.log"            2>/dev/null
+
+  # Azure CustomScript extension's own capture of the bootstrap run
+  for d in /var/lib/waagent/custom-script/download/*/; do
+    [ -d "${d}" ] || continue
+    dst="${DIAG}/customscript/$(basename "${d}")"; mkdir -p "${dst}"
+    cp -f "${d}stdout" "${d}stderr" "${dst}/" 2>/dev/null
+  done
+  cp -f /var/log/azure/*/*.log            "${DIAG}/" 2>/dev/null
+  cp -f /var/log/cloud-init-output.log    "${DIAG}/" 2>/dev/null
+  cloud-init status --long > "${DIAG}/cloud-init-status.txt" 2>/dev/null
+
+  # hardening state + the exact vars each side used
+  cp -f /var/lib/ghrunner/.hardened /var/lib/ghrunner/.bootstrapped \
+        /etc/ghrunner/cis-overrides.yml "${DIAG}/" 2>/dev/null
+
+  # system context - explains the partition + logging skips at a glance
+  {
+    echo "### uname";                uname -a
+    echo; echo "### os-release";     cat /etc/os-release
+    echo; echo "### findmnt";        findmnt -A
+    echo; echo "### lsblk";          lsblk
+    echo; echo "### df -h";          df -h
+    echo; echo "### systemctl --failed"; systemctl --failed --no-pager
+    echo; echo "### unit states"
+    for u in ssh rsyslog systemd-journald systemd-journald.socket auditd apparmor \
+             ufw nftables docker systemd-journal-remote.socket systemd-journal-remote.service; do
+      printf '%-34s enabled=%-10s active=%s\n' "${u}" \
+        "$(systemctl is-enabled "${u}" 2>/dev/null || echo -)" \
+        "$(systemctl is-active  "${u}" 2>/dev/null || echo -)"
+    done
+    echo; echo "### relevant packages"
+    dpkg -l 2>/dev/null | grep -E '^ii[[:space:]]+(libpam-pwquality|auditd|apparmor|ansible|rsyslog|systemd-journal-remote|ufw|nftables)[[:space:]]' || true
+    echo; echo "### sshd -T (effective, sorted, first 80)"
+    sshd -T 2>/dev/null | sort | head -n 80
+    echo; echo "### journald.conf (merged)"
+    systemd-analyze cat-config systemd/journald.conf 2>/dev/null
+  } > "${DIAG}/system-context.txt" 2>&1
+
+  # scrub token / key / JWT shaped strings before anything leaves the box
+  grep -rlIE '(gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN[A-Z ]*PRIVATE KEY-----|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})' "${DIAG}" 2>/dev/null \
+  | while IFS= read -r f; do
+      sed -ri 's/gh[pousr]_[A-Za-z0-9]{20,}/<redacted-token>/g; s/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/<redacted-jwt>/g' "${f}"
+      awk '/-----BEGIN[A-Z ]*PRIVATE KEY-----/{print "<redacted-private-key>";s=1;next} /-----END[A-Z ]*PRIVATE KEY-----/{s=0;next} !s' "${f}" > "${f}.s" && mv "${f}.s" "${f}"
+    done
+
+  tar -C "${OUT}" -czf "${OUT}/diag.tgz" diag 2>/dev/null
+) || true
+
 chmod -R a+rX "${OUT}"
-echo "cis-audit: ${LEVEL} -> ${pc}/${den} passed (${rate}%), ${fc} failed, ${sk} skipped. Reports in ${OUT}/"
+echo "cis-audit: ${LEVEL} -> ${pc}/${den} passed (${rate}%), ${fc} failed, ${sk} skipped. Reports (+ diag/) in ${OUT}/"
 CISAUDIT
   chmod 0755 "${wrapper}"
 

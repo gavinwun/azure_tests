@@ -11,6 +11,13 @@ name: CIS Benchmark (self-hosted runner)
 #
 # The hardening itself is applied at first boot by bootstrap_agent.sh
 # (`cis_hardening_enabled`, default true) - this job just measures it.
+#
+# The uploaded artifact carries results.json / summary.env / audit-vars.yml
+# AND a `diag/` bundle (+ diag.tgz): the first-boot bootstrap log, the
+# ansible-lockdown run, journalctl for the runner/watcher/kernel, the
+# Azure CustomScript extension output, cloud-init, and unit/mount state -
+# collected read-only by the cis-audit wrapper and token-scrubbed, so a
+# stalled hardening run can be diagnosed without SSHing to an instance.
 
 on:
   workflow_dispatch:
@@ -95,9 +102,35 @@ jobs:
             echo "</details>" >> "$GITHUB_STEP_SUMMARY"
           fi
 
+          # Hardening completion signal + first-boot WARN/FATAL lines, pulled
+          # from the diag bundle the cis-audit wrapper drops. Lets you see
+          # whether harden_cis() actually converged without SSHing in.
+          DIAG=/var/lib/cis-audit/diag
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f "$DIAG/.hardened" ]; then
+            echo "**CIS hardening marker:** \`$(cat "$DIAG/.hardened")\`" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "**CIS hardening marker:** _absent_ - harden_cis() did not reach its final step on this instance." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$DIAG/bootstrap_agent_detail.log" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "<details><summary>Bootstrap / hardening WARN + FATAL + ansible failure lines</summary>" >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"; echo '```' >> "$GITHUB_STEP_SUMMARY"
+            grep -nE 'WARN|FATAL|fatal:|ERROR|Error:|failed=[1-9]|unreachable=[1-9]' \
+              "$DIAG/bootstrap_agent_detail.log" 2>/dev/null | tail -n 150 >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           mkdir -p _cis_report
-          cp -f /var/lib/cis-audit/results.json /var/lib/cis-audit/summary.env \
-                /var/lib/cis-audit/audit-vars.yml _cis_report/ 2>/dev/null || true
+          cp -f  /var/lib/cis-audit/results.json /var/lib/cis-audit/summary.env \
+                 /var/lib/cis-audit/audit-vars.yml _cis_report/ 2>/dev/null || true
+          # Full first-boot diagnostics bundle (bootstrap log, ansible run,
+          # journalctl for the runner/watcher, CustomScript ext output,
+          # cloud-init, unit states) - collected read-only by the cis-audit
+          # wrapper, token-scrubbed. Both the browsable dir and the tarball.
+          cp -rf /var/lib/cis-audit/diag     _cis_report/ 2>/dev/null || true
+          cp -f  /var/lib/cis-audit/diag.tgz _cis_report/ 2>/dev/null || true
 
           echo "Pass rate ${RATE}% (threshold ${MIN_PASS_RATE}%)"
           if [ "${MIN_PASS_RATE}" -gt 0 ] 2>/dev/null && [ "${RATE:-0}" -lt "${MIN_PASS_RATE}" ]; then
