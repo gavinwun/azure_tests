@@ -660,14 +660,31 @@ fi
 # Start from the audit's own vars, then layer the SAME runner-safe
 # opt-outs harden_cis() applied, so the audit doesn't fail controls we
 # deliberately skipped for the runner's sake.
+#
+# The overrides use the same ubtu24cis_* keys as vars/CIS.yml, so a
+# naive cat/append produces duplicate YAML mapping keys - goss's yaml
+# parser rejects that outright (no results at all, not just a bad
+# value). Drop each key from the base copy before appending its
+# override so every key appears exactly once.
 vars="${OUT}/audit-vars.yml"
-cp "${AUDIT_DIR}/vars/CIS.yml" "${vars}"
+overrides_raw="$(mktemp)"
 {
-  echo ""
+  [ -f /etc/ghrunner/cis-overrides.yml ] && grep -E '^(ubtu24cis_|skip_reboot)' /etc/ghrunner/cis-overrides.yml || true
+  # explicit LEVEL wins over whatever cis-overrides.yml carried for these
   echo "ubtu24cis_level_1: true"
   echo "ubtu24cis_level_2: $([ "${LEVEL}" = level2 ] && echo true || echo false)"
-  [ -f /etc/ghrunner/cis-overrides.yml ] && grep -E '^(ubtu24cis_|skip_reboot)' /etc/ghrunner/cis-overrides.yml || true
-} >> "${vars}"
+} > "${overrides_raw}"
+overrides="$(mktemp)"
+awk -F: '{ key[$1] = $0 } END { for (k in key) print key[k] }' "${overrides_raw}" > "${overrides}"
+rm -f "${overrides_raw}"
+override_keys="$(sed -nE 's/^([A-Za-z0-9_]+):.*/\1/p' "${overrides}" | paste -sd'|' -)"
+if [ -n "${override_keys}" ]; then
+  grep -vE "^(${override_keys}):" "${AUDIT_DIR}/vars/CIS.yml" > "${vars}"
+else
+  cp "${AUDIT_DIR}/vars/CIS.yml" "${vars}"
+fi
+{ echo ""; cat "${overrides}"; } >> "${vars}"
+rm -f "${overrides}"
 
 cd "${AUDIT_DIR}"
 AUDIT_BIN=/usr/local/bin/goss AUDIT_CONTENT_LOCATION=/opt \
@@ -676,7 +693,14 @@ AUDIT_BIN=/usr/local/bin/goss AUDIT_CONTENT_LOCATION=/opt \
 tc=$(jq -r '.summary."test-count" // 0' "${OUT}/results.json" 2>/dev/null || echo 0)
 fc=$(jq -r '.summary."failed-count" // 0' "${OUT}/results.json" 2>/dev/null || echo 0)
 sl=$(jq -r '.summary."summary-line" // ""' "${OUT}/results.json" 2>/dev/null || echo "")
-[ -n "${tc}" ] && [ "${tc}" -gt 0 ] 2>/dev/null || { echo "cis-audit: no goss results parsed - see ${OUT}/results.json" >&2; exit 1; }
+if ! { [ -n "${tc}" ] && [ "${tc}" -gt 0 ]; } 2>/dev/null; then
+  echo "cis-audit: no goss results parsed - see ${OUT}/results.json" >&2
+  echo "cis-audit: --- ${OUT}/results.json (first 40 lines) ---" >&2
+  head -n 40 "${OUT}/results.json" >&2 2>/dev/null || echo "cis-audit: (file missing or empty)" >&2
+  echo "cis-audit: --- ${vars} (merged vars fed to goss) ---" >&2
+  cat "${vars}" >&2 2>/dev/null || true
+  exit 1
+fi
 sk=$(printf '%s' "${sl}" | sed -n 's/.*Skipped: *\([0-9][0-9]*\).*/\1/p'); sk=${sk:-0}
 den=$(( tc - sk )); [ "${den}" -lt 1 ] && den="${tc}"
 pc=$(( tc - fc - sk )); [ "${pc}" -lt 0 ] && pc=0
