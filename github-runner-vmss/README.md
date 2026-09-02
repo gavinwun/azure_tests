@@ -1256,6 +1256,58 @@ apply `main.tf` with `termination_notification` present. Worth knowing:
     deliberately after reading the changelog), `cis_hardening_skip_rules`
     (extra `ubtu24cis_rule_*` vars to force off). This module creates
     **no NSG**; your landing-zone subnet/NSG rules are unchanged.
+  - **Runner-safe backstop** (`enforce_runner_safe_cis()` in
+    `bootstrap_agent.sh`): the ansible role is linear - one failed task
+    skips everything after it - so after the role runs, the bootstrap
+    also asserts the controls that are pure file/sysctl/unit drops with
+    no way to lock anyone out: `/run/sshd` (so the role's own `sshd -t`
+    validation doesn't fail on an inactive-ssh box), IPv6
+    `accept_ra`/`redirects`/`source_route` sysctls, `journald`
+    Storage/Compress/rotation + masking `systemd-journal-remote`,
+    `libpam-pwquality` + `pwquality.conf(.d)` values, `faillock.conf`
+    thresholds, `login.defs` aging + `chage`, root/`profile.d` umask +
+    `TMOUT`, `sudo` timestamp timeout, `su` restricted to an empty group,
+    and the `sshd_config` directives the audit greps for. It never
+    touches the PAM auth stack wiring (`common-auth`/`-account`/
+    `-password`) - that stays with the role.
+  - **Expected score & accepted exceptions**: a clean level1 run scores
+    **~93-95%**, not 100%, on purpose. Every gap is one of:
+    - **Structurally impossible on a single-disk ephemeral instance** -
+      the §1.1.2 "own partition + `nodev`/`nosuid`/`noexec`" controls for
+      `/var`, `/var/log`, `/var/log/audit`, `/home`, `/var/tmp`. One OS
+      disk, no data disks; isolating these risks a full `/var/log`
+      wedging the box or a size-capped `/tmp` breaking large checkouts.
+      Forced off in `cis_hardening_skip_rules`.
+    - **Guards nothing here / would break boot** - §1.4.1 GRUB bootloader
+      password (no serial/console to a VMSS instance; the OS is rebuilt
+      from the image on every scale event). Forced off.
+    - **Would blind fleet observability** - §6.1.1.4 / §6.1.2.2 ("only
+      journald *or* rsyslog" and journald `ForwardToSyslog=no`). The
+      bootstrap log -> `rsyslog` -> Azure Monitor Agent -> Log Analytics
+      path is how a failed boot is diagnosed *without* SSH; keeping
+      `rsyslog` is deliberate. Forced off. `systemd-journal-remote` is
+      masked instead of installed-as-a-client (§6.1.2.1.1/.2/.3 forced
+      off; §6.1.2.1.4 asserted).
+    - **Audit-tool bug** - §5.1.17 `MaxSessions`: the system is compliant
+      (`MaxSessions 10`, the CIS value) but the goss check's negative
+      regex is unanchored, so the leading `1` of `10` always trips it.
+      Forced off.
+    - **"MANUAL" goss checks with no automated remediation** - §1.2.1.x
+      GPG keys, §2.1.22 listening ports, §6.1.1.2 journald access,
+      §7.1.11 world-writable review, §7.1.13 SUID/SGID review, §1.1.1.10
+      unused-filesystem-module CVE scan. goss reports these as failures
+      by design; nothing to set. ~10 checks, ~2%.
+    - **PAM `faillock` / `pwhistory` not wired** - §5.3.2.2, §5.3.2.4,
+      §5.3.3.3.x, §5.3.3.4.1. The role skips the `pam-auth-update` wiring
+      for these on 24.04, and the backstop deliberately does **not**
+      hand-edit `common-auth`/`-account`/`-password` (that's the one
+      change that can lock every login out of the box). A persistent CI
+      runner never does password auth, so the real-world value is nil.
+    - **Re-managed by systemd-networkd** - the §3.3 IPv6
+      `accept_ra`/`redirects`/`source_route` runtime values get reset
+      per-link on Azure. The role's actual remedy is GRUB
+      `ipv6.disable=1`, which needs a reboot (`skip_reboot: true`).
+      Revisit only if you allow a post-harden reboot.
 - **Scoring a runner against the benchmark**: set `cis_audit_enabled =
   true` (default `false`), apply, and roll the VMSS. That installs
   `/usr/local/sbin/cis-audit` (a fixed, self-validating wrapper that
