@@ -97,6 +97,8 @@ resource "azurerm_function_app_flex_consumption" "queue_fn" {
   service_plan_id     = azurerm_service_plan.queue_fn[0].id
   tags                = local.tags
 
+  public_network_access_enabled = false
+
   storage_container_type      = "blobContainer"
   storage_container_endpoint  = "${azurerm_storage_account.queue_fn[0].primary_blob_endpoint}${azurerm_storage_container.queue_fn_deploy[0].name}"
   storage_authentication_type = "StorageAccountConnectionString"
